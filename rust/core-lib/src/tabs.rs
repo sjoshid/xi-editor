@@ -80,6 +80,7 @@ pub type BufferIdentifier = BufferId;
 /// Totally arbitrary; we reserve this space for `ViewId`s
 pub(crate) const RENDER_VIEW_IDLE_MASK: usize = 1 << 25;
 pub(crate) const REWRAP_VIEW_IDLE_MASK: usize = 1 << 26;
+pub(crate) const FIND_VIEW_IDLE_MASK: usize = 1 << 27;
 
 const NEW_VIEW_IDLE_TOKEN: usize = 1001;
 
@@ -401,9 +402,10 @@ impl CoreState {
             None => return,
         };
 
-        let ed = &self.editors[&buffer_id];
+        let mut save_ctx = self.make_context(view_id).unwrap();
+        let fin_text = save_ctx.text_for_save();
 
-        if let Err(e) = self.file_manager.save(path, ed.borrow().get_buffer(), buffer_id) {
+        if let Err(e) = self.file_manager.save(path, &fin_text, buffer_id) {
             let error_message = e.to_string();
             error!("File error: {:?}", error_message);
             self.peer.alert(error_message);
@@ -585,6 +587,9 @@ impl CoreState {
             other if (other & REWRAP_VIEW_IDLE_MASK) != 0 => {
                 self.handle_rewrap_callback(other ^ REWRAP_VIEW_IDLE_MASK)
             }
+            other if (other & FIND_VIEW_IDLE_MASK) != 0 => {
+                self.handle_find_callback(other ^ FIND_VIEW_IDLE_MASK)
+            }
             other => panic!("unexpected idle token {}", other),
         };
     }
@@ -683,6 +688,14 @@ impl CoreState {
         let id: ViewId = token.into();
         if let Some(mut ctx) = self.make_context(id) {
             ctx.do_rewrap_batch();
+        }
+    }
+
+    /// Callback for doing incremental find in a view
+    fn handle_find_callback(&mut self, token: usize) {
+        let id: ViewId = token.into();
+        if let Some(mut ctx) = self.make_context(id) {
+            ctx.do_incremental_find();
         }
     }
 

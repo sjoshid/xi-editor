@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{self, Value};
 
-use xi_rope::{Interval, LinesMetric, Rope, RopeDelta};
+use xi_rope::{Cursor, Interval, LinesMetric, Rope, RopeDelta};
 use xi_rpc::{Error as RpcError, RemoteError};
 use xi_trace::trace_block;
 
@@ -42,7 +42,9 @@ use crate::plugins::Plugin;
 use crate::recorder::Recorder;
 use crate::selection::InsertDrift;
 use crate::syntax::LanguageId;
-use crate::tabs::{BufferId, PluginId, ViewId, RENDER_VIEW_IDLE_MASK, REWRAP_VIEW_IDLE_MASK};
+use crate::tabs::{
+    BufferId, PluginId, ViewId, FIND_VIEW_IDLE_MASK, RENDER_VIEW_IDLE_MASK, REWRAP_VIEW_IDLE_MASK,
+};
 use crate::view::View;
 use crate::width_cache::WidthCache;
 use crate::WeakXiCore;
@@ -139,6 +141,9 @@ impl<'a> EventContext<'a> {
                 self.editor.borrow_mut().update_edit_type();
                 if self.with_view(|v, t| v.needs_wrap_in_visible_region(t)) {
                     self.rewrap();
+                }
+                if self.with_view(|v, _| v.find_in_progress()) {
+                    self.do_incremental_find();
                 }
             }
             E::Buffer(cmd) => {
@@ -516,6 +521,32 @@ impl<'a> EventContext<'a> {
         self.editor.borrow_mut().dec_revs_in_flight();
     }
 
+    /// Returns the text to be saved, appending a newline if necessary.
+    pub(crate) fn text_for_save(&mut self) -> Rope {
+        let editor = self.editor.borrow();
+        let mut rope = editor.get_buffer().clone();
+        let rope_len = rope.len();
+
+        if rope_len < 1 || !self.config.save_with_newline {
+            return rope;
+        }
+
+        let cursor = Cursor::new(&rope, rope.len());
+        let has_newline_at_eof = match cursor.get_leaf() {
+            Some((last_chunk, _)) => last_chunk.ends_with(&self.config.line_ending),
+            // The rope can't be empty, since we would have returned earlier if it was
+            None => unreachable!(),
+        };
+
+        if !has_newline_at_eof {
+            let line_ending = &self.config.line_ending;
+            rope.edit(rope_len.., line_ending);
+            rope
+        } else {
+            rope
+        }
+    }
+
     /// Called after anything changes that effects word wrap, such as the size of
     /// the window or the user's wrap settings. `rewrap_immediately` should be `true`
     /// except in the resize case; during live resize we want to delay recalculation
@@ -541,6 +572,35 @@ impl<'a> EventContext<'a> {
         let ed = self.editor.borrow();
         let mut width_cache = self.width_cache.borrow_mut();
         view.rewrap(ed.get_buffer(), &mut width_cache, self.client, ed.get_layers().get_merged());
+    }
+
+    /// Does incremental find.
+    pub(crate) fn do_incremental_find(&mut self) {
+        let _t = trace_block("EventContext::do_incremental_find", &["find"]);
+
+        self.find();
+        if self.view.borrow().find_in_progress() {
+            let ed = self.editor.borrow();
+            self.client.find_status(
+                self.view_id,
+                &json!(self.view.borrow().find_status(ed.get_buffer(), true)),
+            );
+            self.schedule_find();
+        }
+        self.render_if_needed();
+    }
+
+    fn schedule_find(&self) {
+        let view_id: usize = self.view_id.into();
+        let token = FIND_VIEW_IDLE_MASK | view_id;
+        self.client.schedule_idle(token);
+    }
+
+    /// Tells the view to execute find on a batch of lines, if needed.
+    fn find(&mut self) {
+        let mut view = self.view.borrow_mut();
+        let ed = self.editor.borrow();
+        view.do_find(ed.get_buffer());
     }
 
     /// Does a rewrap batch, and schedules follow-up work if needed.

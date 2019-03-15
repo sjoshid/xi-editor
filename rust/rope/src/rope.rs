@@ -524,6 +524,26 @@ impl Rope {
         cursor.next::<BaseMetric>()
     }
 
+    /// Returns `offset` if it lies on a codepoint boundary. Otherwise returns
+    /// the codepoint after `offset`.
+    pub fn at_or_next_codepoint_boundary(&self, offset: usize) -> Option<usize> {
+        if self.is_codepoint_boundary(offset) {
+            Some(offset)
+        } else {
+            self.next_codepoint_offset(offset)
+        }
+    }
+
+    /// Returns `offset` if it lies on a codepoint boundary. Otherwise returns
+    /// the codepoint before `offset`.
+    pub fn at_or_prev_codepoint_boundary(&self, offset: usize) -> Option<usize> {
+        if self.is_codepoint_boundary(offset) {
+            Some(offset)
+        } else {
+            self.prev_codepoint_offset(offset)
+        }
+    }
+
     pub fn prev_grapheme_offset(&self, offset: usize) -> Option<usize> {
         let mut cursor = Cursor::new(self, offset);
         cursor.prev_grapheme()
@@ -770,6 +790,12 @@ impl<'a> Cursor<'a, RopeInfo> {
         } else {
             None
         }
+    }
+
+    /// Get the next codepoint after the cursor position, without advancing
+    /// the cursor.
+    pub fn peek_next_codepoint(&self) -> Option<char> {
+        self.get_leaf().and_then(|(l, off)| l[off..].chars().next())
     }
 
     pub fn next_grapheme(&mut self) -> Option<usize> {
@@ -1031,6 +1057,29 @@ mod tests {
         assert_eq!(Some(5), b.next_codepoint_offset(2));
         assert_eq!(Some(2), b.next_codepoint_offset(0));
         assert_eq!(None, b.next_codepoint_offset(9));
+    }
+
+    #[test]
+    fn peek_next_codepoint() {
+        let inp = Rope::from("$¢€£💶");
+        let mut cursor = Cursor::new(&inp, 0);
+        assert_eq!(cursor.peek_next_codepoint(), Some('$'));
+        assert_eq!(cursor.peek_next_codepoint(), Some('$'));
+        assert_eq!(cursor.next_codepoint(), Some('$'));
+        assert_eq!(cursor.peek_next_codepoint(), Some('¢'));
+        assert_eq!(cursor.prev_codepoint(), Some('$'));
+        assert_eq!(cursor.peek_next_codepoint(), Some('$'));
+        assert_eq!(cursor.next_codepoint(), Some('$'));
+        assert_eq!(cursor.next_codepoint(), Some('¢'));
+        assert_eq!(cursor.peek_next_codepoint(), Some('€'));
+        assert_eq!(cursor.next_codepoint(), Some('€'));
+        assert_eq!(cursor.peek_next_codepoint(), Some('£'));
+        assert_eq!(cursor.next_codepoint(), Some('£'));
+        assert_eq!(cursor.peek_next_codepoint(), Some('💶'));
+        assert_eq!(cursor.next_codepoint(), Some('💶'));
+        assert_eq!(cursor.peek_next_codepoint(), None);
+        assert_eq!(cursor.next_codepoint(), None);
+        assert_eq!(cursor.peek_next_codepoint(), None);
     }
 
     #[test]
