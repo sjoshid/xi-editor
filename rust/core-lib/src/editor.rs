@@ -941,6 +941,14 @@ impl Editor {
 
         Some(GetDataResponse { chunk, offset, first_line, first_line_offset })
     }
+
+    pub(crate) fn tail_append(&mut self, tail: Rope) {
+        let buf_end = self.text.len();
+        let mut builder = DeltaBuilder::new(buf_end);
+        builder.replace(buf_end..buf_end, tail);
+        self.add_delta(builder.build());
+        self.set_pristine();
+    }
 }
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Serialize, Deserialize)]

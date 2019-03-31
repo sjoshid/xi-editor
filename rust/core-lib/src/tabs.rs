@@ -331,6 +331,7 @@ impl CoreState {
             // handled at the top level
             ClientStarted { .. } => (),
             SetLanguage { view_id, language_id } => self.do_set_language(view_id, language_id),
+            ToggleTail { view_id, enabled } => self.do_toggle_tail(view_id, enabled),
         }
     }
 
@@ -550,6 +551,28 @@ impl CoreState {
     fn after_stop_plugin(&mut self, plugin: &Plugin) {
         self.iter_groups().for_each(|mut cx| cx.plugin_stopped(plugin));
     }
+
+    #[cfg(feature = "notify")]
+    fn do_toggle_tail(&mut self, view_id: ViewId, enabled: bool) {
+        if let Some(view) = self.views.get_mut(&view_id) {
+            let buffer_id = view.borrow().get_buffer_id();
+            view.borrow_mut().toggle_tail(enabled);
+            match self.file_manager.toggle_tail(buffer_id, enabled) {
+                Ok(()) => {
+                    debug!("Tail is {:?} for {:?}", enabled, view_id);
+                    let mut context = self.make_context(view_id).unwrap();
+                    context.toggle_tail_config_changed(enabled);
+                    return;
+                }
+                Err(err) => error!("Error reading file: {}", err),
+            }
+        }
+    }
+
+    #[cfg(not(feature = "notify"))]
+    fn do_toggle_tail(&mut self, _view_id: ViewId, _enabled: bool) {
+        warn!("do_toggle_tail called without notify feature enabled.");
+    }
 }
 
 /// Idle, tracing, and file event handling
@@ -728,7 +751,20 @@ impl CoreState {
                     .find(|v| v.borrow().get_buffer_id() == buffer_id)
                     .map(|v| v.borrow().get_view_id())
                     .unwrap();
-                self.make_context(view_id).unwrap().reload(text);
+
+                let file_info = self.file_manager.get_info(buffer_id);
+
+                match file_info {
+                    Some(v) => {
+                        let tail_mode_on = v.tail_details.is_tail_enabled;
+                        if tail_mode_on {
+                            self.make_context(view_id).unwrap().reload_tail(text);
+                        } else {
+                            self.make_context(view_id).unwrap().reload(text);
+                        }
+                    }
+                    None => error!("File info not found for buffer id {}", buffer_id),
+                };
             }
         }
     }
