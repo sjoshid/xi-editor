@@ -100,6 +100,9 @@ const THEME_FILE_EVENT_TOKEN: WatchToken = WatchToken(3);
 #[cfg(feature = "notify")]
 const PLUGIN_EVENT_TOKEN: WatchToken = WatchToken(4);
 
+#[cfg(feature = "notify")]
+pub const OPEN_FILE_ONGOING_WRITE_EVENT: WatchToken = WatchToken(5);
+
 #[allow(dead_code)]
 pub struct CoreState {
     editors: BTreeMap<BufferId, RefCell<Editor>>,
@@ -710,6 +713,7 @@ impl CoreState {
                 CONFIG_EVENT_TOKEN => self.handle_config_fs_event(event),
                 THEME_FILE_EVENT_TOKEN => self.handle_themes_fs_event(event),
                 PLUGIN_EVENT_TOKEN => self.handle_plugin_fs_event(event),
+                OPEN_FILE_ONGOING_WRITE_EVENT => self.handle_ongoing_write_event(event),
                 _ => warn!("unexpected fs event token {:?}", token),
             }
         }
@@ -717,6 +721,28 @@ impl CoreState {
 
     #[cfg(not(feature = "notify"))]
     fn handle_fs_events(&mut self) {}
+
+    #[cfg(feature = "notify")]
+    fn handle_ongoing_write_event(&mut self, event: DebouncedEvent) {
+        if let DebouncedEvent::OnGoingWrite(path) = event {
+            let buffer_id = match self.file_manager.get_editor(&path) {
+                Some(id) => id,
+                None => return,
+            };
+
+            //sj_todo check has_changes and is_pristine?
+            if let Ok(text) = File::try_tail_file(path)? {
+                let view_id = self
+                    .views
+                    .values()
+                    .find(|v| v.borrow().get_buffer_id() == buffer_id)
+                    .map(|v| v.borrow().get_view_id())
+                    .unwrap();
+
+                self.make_context(view_id).unwrap().reload_tail(text);
+            }
+        }
+    }
 
     /// Handles a file system event related to a currently open file
     #[cfg(feature = "notify")]
@@ -751,20 +777,7 @@ impl CoreState {
                     .find(|v| v.borrow().get_buffer_id() == buffer_id)
                     .map(|v| v.borrow().get_view_id())
                     .unwrap();
-
-                let file_info = self.file_manager.get_info(buffer_id);
-
-                match file_info {
-                    Some(v) => {
-                        let tail_mode_on = v.tail_details.is_tail_enabled;
-                        if tail_mode_on {
-                            self.make_context(view_id).unwrap().reload_tail(text);
-                        } else {
-                            self.make_context(view_id).unwrap().reload(text);
-                        }
-                    }
-                    None => error!("File info not found for buffer id {}", buffer_id),
-                };
+                self.make_context(view_id).unwrap().reload(text);
             }
         }
     }
