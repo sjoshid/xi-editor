@@ -225,7 +225,7 @@ impl Watchee {
         use self::DebouncedEvent::*;
         match *event {
             NoticeWrite(ref p) | NoticeRemove(ref p) | Create(ref p) | Write(ref p)
-            | Chmod(ref p) | Remove(ref p) => self.applies_to_path(p),
+            | Chmod(ref p) | Remove(ref p) | OnGoingWrite(ref p) => self.applies_to_path(p),
             Rename(ref p1, ref p2) => self.applies_to_path(p1) || self.applies_to_path(p2),
             Rescan => false,
             Error(_, ref opt_p) => opt_p.as_ref().map(|p| self.applies_to_path(p)).unwrap_or(false),
@@ -296,7 +296,8 @@ fn clone_event(event: &DebouncedEvent) -> DebouncedEvent {
                 Io(ref e) => Generic(format!("{:?}", e)),
             };
             Error(error, opt_p.clone())
-        }
+        },
+        OnGoingWrite(ref p) => OnGoingWrite(p.to_owned()),
     }
 }
 

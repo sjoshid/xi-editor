@@ -31,6 +31,8 @@ use crate::tabs::BufferId;
 #[cfg(feature = "notify")]
 use crate::tabs::OPEN_FILE_EVENT_TOKEN;
 #[cfg(feature = "notify")]
+use crate::tabs::OPEN_FILE_ONGOING_WRITE_EVENT;
+#[cfg(feature = "notify")]
 use crate::watcher::FileWatcher;
 #[cfg(target_family = "unix")]
 use std::os::unix::fs::PermissionsExt;
@@ -118,7 +120,7 @@ impl FileManager {
             let _ = File::create(path).map_err(|e| FileError::Io(e, path.to_owned()))?;
         }
 
-        let (rope, info) = try_load_file(self, id, path)?;
+        let (rope, info) = try_load_file(path)?;
 
         self.open_files.insert(path.to_owned(), id);
         if self.file_info.insert(id, info).is_none() {
@@ -188,67 +190,46 @@ impl FileManager {
     #[cfg(feature = "notify")]
     pub fn toggle_tail(&mut self, id: BufferId, enabled: bool) -> Result<(), FileError> {
         if let Some(v) = self.file_info.get_mut(&id) {
+            let path = v.path.as_path();
             if enabled {
-                let path = v.path.as_path();
                 let mut f = File::open(path).map_err(|e| FileError::Io(e, path.to_owned()))?;
                 let end_position =
                     f.seek(SeekFrom::End(0)).map_err(|e| FileError::Io(e, path.to_owned()))?;
 
                 v.tail_details.current_position_in_tail = end_position;
+                self.watcher.watch(path, false, OPEN_FILE_ONGOING_WRITE_EVENT);
+            } else {
+                self.watcher.unwatch(path, OPEN_FILE_ONGOING_WRITE_EVENT);
+                v.tail_details.is_tail_enabled = enabled;
             }
-            v.tail_details.is_tail_enabled = enabled;
         }
         Ok(())
     }
 }
 
-fn try_load_file<P>(
-    file_manager: &FileManager,
-    buffer_id: BufferId,
-    path: P,
-) -> Result<(Rope, FileInfo), FileError>
-where
-    P: AsRef<Path>,
+pub fn try_tail_file<P>(path: P) -> Result<(Rope, FileInfo), FileError>
+    where
+        P: AsRef<Path>,
 {
-    // TODO: support for non-utf8
-    // it's arguable that the rope crate should have file loading functionality
+    debug!("Tailing file");
     let mut f =
         File::open(path.as_ref()).map_err(|e| FileError::Io(e, path.as_ref().to_owned()))?;
-    let mut new_tail_details = TailDetails::default();
     let mut bytes = Vec::new();
+    let end_position = f
+        .seek(SeekFrom::End(0))
+        .map_err(|e| FileError::Io(e, path.as_ref().to_owned()))?;
+    let current_position = v.tail_details.current_position_in_tail;
 
-    let file_info = file_manager.get_info(buffer_id);
-    match file_info {
-        Some(v) => {
-            let is_tail_enabled = v.tail_details.is_tail_enabled;
-            if is_tail_enabled {
-                debug!("Tailing file");
-                let end_position = f
-                    .seek(SeekFrom::End(0))
-                    .map_err(|e| FileError::Io(e, path.as_ref().to_owned()))?;
-                let current_position = v.tail_details.current_position_in_tail;
+    let diff = end_position - current_position;
+    bytes = vec![0; diff as usize];
+    f.seek(SeekFrom::Current(-(bytes.len() as i64))).unwrap();
+    f.read_exact(&mut bytes).unwrap();
 
-                let diff = end_position - current_position;
-                bytes = vec![0; diff as usize];
-                f.seek(SeekFrom::Current(-(bytes.len() as i64))).unwrap();
-                f.read_exact(&mut bytes).unwrap();
-
-                new_tail_details = TailDetails {
-                    current_position_in_tail: end_position,
-                    is_tail_enabled: v.tail_details.is_tail_enabled,
-                    is_at_bottom_of_file: v.tail_details.is_at_bottom_of_file,
-                };
-            } else {
-                debug!("Tail is false, So loading entire file.");
-                f.read_to_end(&mut bytes)
-                    .map_err(|e| FileError::Io(e, path.as_ref().to_owned()))?;
-            }
-        }
-        None => {
-            debug!("Loading entire file");
-            f.read_to_end(&mut bytes).map_err(|e| FileError::Io(e, path.as_ref().to_owned()))?;
-        }
-    }
+    let new_tail_details = TailDetails {
+        current_position_in_tail: end_position,
+        is_tail_enabled: v.tail_details.is_tail_enabled,
+        is_at_bottom_of_file: v.tail_details.is_at_bottom_of_file,
+    };
 
     let encoding = CharacterEncoding::guess(&bytes);
     let rope = try_decode(bytes, encoding, path.as_ref())?;
@@ -261,6 +242,32 @@ where
         path: path.as_ref().to_owned(),
         has_changed: false,
         tail_details: new_tail_details,
+    };
+    Ok((rope, info))
+}
+
+fn try_load_file<P>(path: P) -> Result<(Rope, FileInfo), FileError>
+where
+    P: AsRef<Path>,
+{
+    // TODO: support for non-utf8
+    // it's arguable that the rope crate should have file loading functionality
+    let mut f =
+        File::open(path.as_ref()).map_err(|e| FileError::Io(e, path.as_ref().to_owned()))?;
+    let mut bytes = Vec::new();
+    f.read_to_end(&mut bytes).map_err(|e| FileError::Io(e, path.as_ref().to_owned()))?;
+
+    let encoding = CharacterEncoding::guess(&bytes);
+    let rope = try_decode(bytes, encoding, path.as_ref())?;
+    let info = FileInfo {
+        encoding,
+        mod_time: get_mod_time(&path),
+        #[cfg(target_family = "unix")]
+        permissions: get_permissions(&path),
+        path: path.as_ref().to_owned(),
+        has_changed: false,
+        #[cfg(feature = "notify")]
+        tail_details: TailDetails::default(),
     };
     Ok((rope, info))
 }
