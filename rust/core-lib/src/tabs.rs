@@ -731,7 +731,7 @@ impl CoreState {
             };
 
             //sj_todo check has_changes and is_pristine?
-            if let Ok(text) = File::try_tail_file(path)? {
+            if let Ok(text) = self.file_manager.open_for_tail(&path, buffer_id) {
                 let view_id = self
                     .views
                     .values()

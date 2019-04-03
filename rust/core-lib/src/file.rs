@@ -115,6 +115,13 @@ impl FileManager {
         false
     }
 
+    #[cfg(feature = "notify")]
+    //sj_todo do we need FileError
+    pub fn open_for_tail(&mut self, path: &Path, id: BufferId) -> Result<Rope, FileError> {
+        let existing_file_info =  self.file_info.get_mut(&id).unwrap();
+        try_tail_file(existing_file_info, path)
+    }
+
     pub fn open(&mut self, path: &Path, id: BufferId) -> Result<Rope, FileError> {
         if !path.exists() {
             let _ = File::create(path).map_err(|e| FileError::Io(e, path.to_owned()))?;
@@ -207,43 +214,35 @@ impl FileManager {
     }
 }
 
-pub fn try_tail_file<P>(path: P) -> Result<(Rope, FileInfo), FileError>
+#[cfg(feature = "notify")]
+pub fn try_tail_file<P>(
+    existing_file_info: &mut FileInfo,
+    path: P,
+) -> Result<Rope, FileError>
     where
         P: AsRef<Path>,
 {
-    debug!("Tailing file");
     let mut f =
         File::open(path.as_ref()).map_err(|e| FileError::Io(e, path.as_ref().to_owned()))?;
     let mut bytes = Vec::new();
+
+    let existing_tail_details = &mut existing_file_info.tail_details;
     let end_position = f
         .seek(SeekFrom::End(0))
         .map_err(|e| FileError::Io(e, path.as_ref().to_owned()))?;
-    let current_position = v.tail_details.current_position_in_tail;
+    let current_position = existing_tail_details.current_position_in_tail;
 
     let diff = end_position - current_position;
     bytes = vec![0; diff as usize];
     f.seek(SeekFrom::Current(-(bytes.len() as i64))).unwrap();
     f.read_exact(&mut bytes).unwrap();
 
-    let new_tail_details = TailDetails {
-        current_position_in_tail: end_position,
-        is_tail_enabled: v.tail_details.is_tail_enabled,
-        is_at_bottom_of_file: v.tail_details.is_at_bottom_of_file,
-    };
+    existing_tail_details.current_position_in_tail = end_position;
 
     let encoding = CharacterEncoding::guess(&bytes);
     let rope = try_decode(bytes, encoding, path.as_ref())?;
 
-    let info = FileInfo {
-        encoding,
-        mod_time: get_mod_time(&path),
-        #[cfg(target_family = "unix")]
-        permissions: get_permissions(&path),
-        path: path.as_ref().to_owned(),
-        has_changed: false,
-        tail_details: new_tail_details,
-    };
-    Ok((rope, info))
+    Ok(rope)
 }
 
 fn try_load_file<P>(path: P) -> Result<(Rope, FileInfo), FileError>
