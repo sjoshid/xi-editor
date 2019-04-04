@@ -34,7 +34,7 @@
 //! - We are integrated with the xi_rpc runloop; events are queued as
 //! they arrive, and an idle task is scheduled.
 
-use notify::{watcher, DebouncedEvent, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{watcher, DebouncedEvent, RecommendedWatcher, RecursiveMode, Watcher, Config};
 use std::collections::VecDeque;
 use std::fmt;
 use std::mem;
@@ -98,6 +98,7 @@ impl FileWatcher {
         let state_clone = state.clone();
 
         let inner = watcher(tx_event, Duration::from_millis(100)).expect("watcher should spawn");
+        inner.configure(Config::OngoingWrites(Some(Duration::from_millis(1000))));
 
         thread::spawn(move || {
             while let Ok(event) = rx_event.recv() {

@@ -205,8 +205,10 @@ impl FileManager {
 
                 v.tail_details.current_position_in_tail = end_position;
                 self.watcher.watch(path, false, OPEN_FILE_ONGOING_WRITE_EVENT);
+                self.watcher.unwatch(path, OPEN_FILE_EVENT_TOKEN);
             } else {
                 self.watcher.unwatch(path, OPEN_FILE_ONGOING_WRITE_EVENT);
+                self.watcher.watch(path, false,OPEN_FILE_EVENT_TOKEN);
                 v.tail_details.is_tail_enabled = enabled;
             }
         }
