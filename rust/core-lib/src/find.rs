@@ -17,7 +17,7 @@
 use std::cmp::{max, min};
 use std::iter;
 
-use crate::annotations::{AnnotationSlice, AnnotationType, ToAnnotation};
+use crate::annotations::{AnnotationRange, AnnotationSlice, AnnotationType, ToAnnotation};
 use crate::selection::{InsertDrift, SelRegion, Selection};
 use crate::view::View;
 use crate::word_boundaries::WordCursor;
@@ -270,9 +270,13 @@ impl Find {
 
         let mut raw_lines = text.lines_raw(from..to);
 
-        while let Some(start) =
-            find(&mut find_cursor, &mut raw_lines, self.case_matching, &search_string, &self.regex)
-        {
+        while let Some(start) = find(
+            &mut find_cursor,
+            &mut raw_lines,
+            self.case_matching,
+            &search_string,
+            self.regex.as_ref(),
+        ) {
             let end = find_cursor.pos();
 
             if self.whole_words && !self.is_matching_whole_words(text, start, end) {
@@ -412,9 +416,10 @@ impl ToAnnotation for Find {
             .map(|region| {
                 let (start_line, start_col) = view.offset_to_line_col(text, region.min());
                 let (end_line, end_col) = view.offset_to_line_col(text, region.max());
-                [start_line, start_col, end_line, end_col]
+
+                AnnotationRange { start_line, start_col, end_line, end_col }
             })
-            .collect::<Vec<[usize; 4]>>();
+            .collect::<Vec<AnnotationRange>>();
 
         let payload = iter::repeat(json!({"id": self.id})).take(ranges.len()).collect::<Vec<_>>();
 

@@ -16,7 +16,7 @@
 //! storing the result of line breaking.
 
 use crate::interval::Interval;
-use crate::tree::{Leaf, Metric, Node, NodeInfo, TreeBuilder};
+use crate::tree::{DefaultMetric, Leaf, Metric, Node, NodeInfo, TreeBuilder};
 use std::cmp::min;
 use std::mem;
 
@@ -89,6 +89,10 @@ impl NodeInfo for BreaksInfo {
     fn compute_info(l: &BreaksLeaf) -> BreaksInfo {
         BreaksInfo(l.data.len())
     }
+}
+
+impl DefaultMetric for BreaksInfo {
+    type DefaultMetric = BreaksBaseMetric;
 }
 
 impl BreaksLeaf {
@@ -306,5 +310,20 @@ mod tests {
     fn larger() {
         let node = gen(100);
         assert_eq!(node.len(), 1000);
+    }
+
+    #[test]
+    fn default_metric_test() {
+        use super::BreaksBaseMetric;
+
+        let breaks = gen(10);
+        assert_eq!(
+            breaks.convert_metrics::<BreaksBaseMetric, BreaksMetric>(5),
+            breaks.count::<BreaksMetric>(5)
+        );
+        assert_eq!(
+            breaks.convert_metrics::<BreaksMetric, BreaksBaseMetric>(7),
+            breaks.count_base_units::<BreaksMetric>(7)
+        );
     }
 }

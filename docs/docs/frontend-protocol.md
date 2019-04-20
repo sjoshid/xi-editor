@@ -33,7 +33,7 @@ from core: {"id":0,"result": "view-id-1"}
 
 ### client_started
 
-`client_started {"config_dir" "some/path"?, "client_extras_dir":
+`client_started {"config_dir": "some/path"?, "client_extras_dir":
 "some/other/path"?}`
 
 Sent by the client immediately after establishing the core connection. This is
@@ -703,6 +703,18 @@ this writing, the following is valid json for a `Command` object:
         ]
     }
 ```
+
+### update_spans
+
+`update_spans {"start": 0, "len": 20, "spans": [{ "start": 1, "end": 3, "scope_id": 4 }], "rev": 3 }`
+
+Updates existing scope spans starting at offset `start` until offset `len`.
+
+### update_annotations
+
+`update_annotations {"start": 0, "len": 20, "spans": [{ "start": 0, "end": 4, "data": null }], "annotation_type": "find", "rev": 3 }`
+
+Updates existing annotations and adds new annotations starting at offset `start` until offset `len`.
 
 ### Language Support Specific Commands
 
