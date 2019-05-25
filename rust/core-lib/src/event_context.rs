@@ -712,7 +712,7 @@ impl<'a> EventContext<'a> {
 }
 
 #[cfg(test)]
-#[cfg_attr(rustfmt, rustfmt_skip)]
+#[rustfmt::skip]
 mod tests {
     use super::*;
     use crate::config::ConfigManager;
@@ -1980,7 +1980,7 @@ mod tests {
         assert_eq!(rev_token, new_rev_token);
     }
 
-    
+
     #[test]
     fn empty_transpose() {
         let harness = ContextHarness::new("");
