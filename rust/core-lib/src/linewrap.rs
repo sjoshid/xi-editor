@@ -17,8 +17,7 @@
 use std::cmp::Ordering;
 use std::ops::Range;
 
-use xi_rope::breaks::{BreakBuilder, Breaks, BreaksBaseMetric, BreaksInfo, BreaksMetric};
-use xi_rope::rope::BaseMetric;
+use xi_rope::breaks::{BreakBuilder, Breaks, BreaksInfo, BreaksMetric};
 use xi_rope::spans::Spans;
 use xi_rope::{Cursor, Interval, LinesMetric, Rope, RopeDelta, RopeInfo};
 use xi_trace::trace_block;
@@ -111,7 +110,7 @@ impl Lines {
     pub(crate) fn set_wrap_width(&mut self, text: &Rope, wrap: WrapWidth) {
         self.work.clear();
         self.add_task(0..text.len());
-        if self.breaks.len() == 0 || self.wrap.differs_in_kind(wrap) {
+        if self.breaks.is_empty() || self.wrap.differs_in_kind(wrap) {
             // we keep breaks while resizing, for more efficient invalidation
             self.breaks = Breaks::new_no_break(text.len());
         }
@@ -163,7 +162,7 @@ impl Lines {
     pub(crate) fn visual_line_of_offset(&self, text: &Rope, offset: usize) -> usize {
         let mut line = text.line_of_offset(offset);
         if self.wrap != WrapWidth::None {
-            line += self.breaks.convert_metrics::<BreaksBaseMetric, BreaksMetric>(offset)
+            line += self.breaks.count::<BreaksMetric>(offset)
         }
         line
     }
@@ -246,7 +245,9 @@ impl Lines {
                 new_work.push(head);
                 new_work.push(tail);
             } else {
-                new_work.push(task.translate_neg(iv.size()).translate(new_len));
+                // take task - our edit interval, then translate it (- old_size, + new_size)
+                let tail = task.suffix(iv).translate(new_len).translate_neg(iv.size());
+                new_work.push(tail);
             }
         }
         new_work.retain(|iv| !iv.is_empty());
@@ -306,9 +307,8 @@ impl Lines {
         let next_hard_break = text.offset_of_line(new_logical_end_line);
 
         // count the soft breaks in the region we will rewrap, before we update them.
-        let inval_soft =
-            self.breaks.convert_metrics::<BreaksBaseMetric, BreaksMetric>(old_logical_end_offset)
-                - self.breaks.convert_metrics::<BreaksBaseMetric, BreaksMetric>(prev_break);
+        let inval_soft = self.breaks.count::<BreaksMetric>(old_logical_end_offset)
+            - self.breaks.count::<BreaksMetric>(prev_break);
 
         // update soft breaks, adding empty spans in the edited region
         let mut builder = BreakBuilder::new();
@@ -414,8 +414,8 @@ impl Lines {
         let end = task.start + breaks.len();
 
         // this is correct *only* when an edit has not occured.
-        let inval_soft = self.breaks.convert_metrics::<BreaksBaseMetric, BreaksMetric>(end)
-            - self.breaks.convert_metrics::<BreaksBaseMetric, BreaksMetric>(task.start);
+        let inval_soft =
+            self.breaks.count::<BreaksMetric>(end) - self.breaks.count::<BreaksMetric>(task.start);
 
         let hard_count = 1 + text.line_of_offset(end) - text.line_of_offset(task.start);
 
@@ -428,6 +428,15 @@ impl Lines {
         self.update_tasks_after_wrap(iv);
 
         WrapSummary { start_line, inval_count, new_count, new_soft }
+    }
+
+    pub fn logical_line_range(&self, text: &Rope, line: usize) -> (usize, usize) {
+        let mut cursor = MergedBreaks::new(text, &self.breaks);
+        let offset = cursor.offset_of_line(line);
+        let logical_line = text.line_of_offset(offset);
+        let start_logical_line_offset = text.offset_of_line(logical_line);
+        let end_logical_line_offset = text.offset_of_line(logical_line + 1);
+        (start_logical_line_offset, end_logical_line_offset)
     }
 
     #[cfg(test)]
@@ -761,8 +770,7 @@ impl<'a> MergedBreaks<'a> {
 }
 
 fn merged_line_of_offset(text: &Rope, soft: &Breaks, offset: usize) -> usize {
-    text.convert_metrics::<BaseMetric, LinesMetric>(offset)
-        + soft.convert_metrics::<BreaksBaseMetric, BreaksMetric>(offset)
+    text.count::<LinesMetric>(offset) + soft.count::<BreaksMetric>(offset)
 }
 
 #[cfg(test)]
@@ -1179,5 +1187,16 @@ mod tests {
         assert_eq!(make_ranges(&lines.work), vec![0..20, 30..50]);
         lines.patchup_tasks(10..10, 10);
         assert_eq!(make_ranges(&lines.work), vec![0..30, 40..60]);
+    }
+
+    /// https://github.com/xi-editor/xi-editor/issues/1112
+    #[test]
+    fn patchup_for_edit_before_task() {
+        let mut lines = Lines::default();
+        lines.add_task(0..100);
+        lines.update_tasks_after_wrap(0..30);
+        assert_eq!(make_ranges(&lines.work), vec![30..100]);
+        lines.patchup_tasks(5..90, 80);
+        assert_eq!(make_ranges(&lines.work), vec![85..95]);
     }
 }

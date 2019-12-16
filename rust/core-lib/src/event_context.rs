@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{self, Value};
 
-use xi_rope::{Interval, LinesMetric, Rope, RopeDelta};
+use xi_rope::{Cursor, Interval, LinesMetric, Rope, RopeDelta};
 use xi_rpc::{Error as RpcError, RemoteError};
 use xi_trace::trace_block;
 
@@ -31,18 +31,19 @@ use crate::plugins::rpc::{
 };
 use crate::rpc::{EditNotification, EditRequest, LineRange, Position as ClientPosition};
 
-use crate::config::{BufferItems, Table};
-use crate::styles::ThemeStyleMap;
-
 use crate::client::Client;
+use crate::config::{BufferItems, Table};
 use crate::edit_types::{EventDomain, SpecialEvent};
 use crate::editor::Editor;
 use crate::file::FileInfo;
 use crate::plugins::Plugin;
 use crate::recorder::Recorder;
 use crate::selection::InsertDrift;
+use crate::styles::ThemeStyleMap;
 use crate::syntax::LanguageId;
-use crate::tabs::{BufferId, PluginId, ViewId, RENDER_VIEW_IDLE_MASK, REWRAP_VIEW_IDLE_MASK};
+use crate::tabs::{
+    BufferId, PluginId, ViewId, FIND_VIEW_IDLE_MASK, RENDER_VIEW_IDLE_MASK, REWRAP_VIEW_IDLE_MASK,
+};
 use crate::view::View;
 use crate::width_cache::WidthCache;
 use crate::WeakXiCore;
@@ -139,6 +140,9 @@ impl<'a> EventContext<'a> {
                 self.editor.borrow_mut().update_edit_type();
                 if self.with_view(|v, t| v.needs_wrap_in_visible_region(t)) {
                     self.rewrap();
+                }
+                if self.with_view(|v, _| v.find_in_progress()) {
+                    self.do_incremental_find();
                 }
             }
             E::Buffer(cmd) => {
@@ -239,6 +243,11 @@ impl<'a> EventContext<'a> {
             }
             UpdateStatusItem { key, value } => {
                 self.client.update_status_item(self.view_id, &key, &value)
+            }
+            UpdateAnnotations { start, len, spans, annotation_type, rev } => {
+                self.with_editor(|ed, view, _, _| {
+                    ed.update_annotations(view, plugin, start, len, spans, annotation_type, rev)
+                })
             }
             RemoveStatusItem { key } => self.client.remove_status_item(self.view_id, &key),
             ShowHover { request_id, result } => self.do_show_hover(request_id, result),
@@ -387,10 +396,21 @@ impl<'a> EventContext<'a> {
 /// requires access to particular combinations of state. We isolate such
 /// special cases here.
 impl<'a> EventContext<'a> {
+    pub(crate) fn view_init(&mut self) {
+        let wrap_width = self.config.wrap_width;
+        let word_wrap = self.config.word_wrap;
+
+        self.with_view(|view, text| view.update_wrap_settings(text, wrap_width, word_wrap));
+    }
+
     pub(crate) fn finish_init(&mut self, config: &Table) {
         if !self.plugins.is_empty() {
             let info = self.plugin_info();
-            self.plugins.iter().for_each(|plugin| plugin.new_buffer(&info));
+
+            self.plugins.iter().for_each(|plugin| {
+                plugin.new_buffer(&info);
+                self.plugin_started(plugin);
+            });
         }
 
         let available_plugins = self
@@ -402,7 +422,16 @@ impl<'a> EventContext<'a> {
 
         self.client.config_changed(self.view_id, config);
         self.client.language_changed(self.view_id, &self.language);
-        self.update_wrap_settings(true);
+
+        // Rewrap and request a render.
+        // This is largely similar to update_wrap_settings(), the only difference
+        // being that the view is expected to be already initialized.
+        self.rewrap();
+
+        if self.view.borrow().needs_more_wrap() {
+            self.schedule_rewrap();
+        }
+
         self.with_view(|view, text| view.set_dirty(text));
         self.render()
     }
@@ -462,6 +491,10 @@ impl<'a> EventContext<'a> {
         self.render_tail();
     }
 
+    pub(crate) fn toggle_tail_config_changed(&mut self, is_tail_enabled: bool) {
+        self.client.toggle_tail_config_changed(self.view_id, is_tail_enabled);
+    }
+
     pub(crate) fn plugin_info(&mut self) -> PluginBufferInfo {
         let ed = self.editor.borrow();
         let nb_lines = ed.get_buffer().measure::<LinesMetric>() + 1;
@@ -484,7 +517,7 @@ impl<'a> EventContext<'a> {
         )
     }
 
-    pub(crate) fn plugin_started(&mut self, plugin: &Plugin) {
+    pub(crate) fn plugin_started(&self, plugin: &Plugin) {
         self.client.plugin_started(self.view_id, &plugin.name)
     }
 
@@ -512,6 +545,32 @@ impl<'a> EventContext<'a> {
         self.editor.borrow_mut().dec_revs_in_flight();
     }
 
+    /// Returns the text to be saved, appending a newline if necessary.
+    pub(crate) fn text_for_save(&mut self) -> Rope {
+        let editor = self.editor.borrow();
+        let mut rope = editor.get_buffer().clone();
+        let rope_len = rope.len();
+
+        if rope_len < 1 || !self.config.save_with_newline {
+            return rope;
+        }
+
+        let cursor = Cursor::new(&rope, rope.len());
+        let has_newline_at_eof = match cursor.get_leaf() {
+            Some((last_chunk, _)) => last_chunk.ends_with(&self.config.line_ending),
+            // The rope can't be empty, since we would have returned earlier if it was
+            None => unreachable!(),
+        };
+
+        if !has_newline_at_eof {
+            let line_ending = &self.config.line_ending;
+            rope.edit(rope_len.., line_ending);
+            rope
+        } else {
+            rope
+        }
+    }
+
     /// Called after anything changes that effects word wrap, such as the size of
     /// the window or the user's wrap settings. `rewrap_immediately` should be `true`
     /// except in the resize case; during live resize we want to delay recalculation
@@ -537,6 +596,35 @@ impl<'a> EventContext<'a> {
         let ed = self.editor.borrow();
         let mut width_cache = self.width_cache.borrow_mut();
         view.rewrap(ed.get_buffer(), &mut width_cache, self.client, ed.get_layers().get_merged());
+    }
+
+    /// Does incremental find.
+    pub(crate) fn do_incremental_find(&mut self) {
+        let _t = trace_block("EventContext::do_incremental_find", &["find"]);
+
+        self.find();
+        if self.view.borrow().find_in_progress() {
+            let ed = self.editor.borrow();
+            self.client.find_status(
+                self.view_id,
+                &json!(self.view.borrow().find_status(ed.get_buffer(), true)),
+            );
+            self.schedule_find();
+        }
+        self.render_if_needed();
+    }
+
+    fn schedule_find(&self) {
+        let view_id: usize = self.view_id.into();
+        let token = FIND_VIEW_IDLE_MASK | view_id;
+        self.client.schedule_idle(token);
+    }
+
+    /// Tells the view to execute find on a batch of lines, if needed.
+    fn find(&mut self) {
+        let mut view = self.view.borrow_mut();
+        let ed = self.editor.borrow();
+        view.do_find(ed.get_buffer());
     }
 
     /// Does a rewrap batch, and schedules follow-up work if needed.
@@ -644,7 +732,7 @@ impl<'a> EventContext<'a> {
 }
 
 #[cfg(test)]
-#[cfg_attr(rustfmt, rustfmt_skip)]
+#[rustfmt::skip]
 mod tests {
     use super::*;
     use crate::config::ConfigManager;
@@ -682,6 +770,7 @@ mod tests {
             let recorder = RefCell::new(Recorder::new());
             let harness = ContextHarness { view, editor, client, core_ref, kill_ring,
                              style_map, width_cache, config_manager, recorder };
+            harness.make_context().view_init();
             harness.make_context().finish_init(&config);
             harness
 
@@ -1912,7 +2001,7 @@ mod tests {
         assert_eq!(rev_token, new_rev_token);
     }
 
-    
+
     #[test]
     fn empty_transpose() {
         let harness = ContextHarness::new("");

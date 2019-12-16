@@ -42,6 +42,7 @@ use crate::event_context::EventContext;
 use crate::file::FileManager;
 use crate::line_ending::LineEnding;
 use crate::plugin_rpc::{PluginNotification, PluginRequest};
+use crate::plugins::rpc::ClientPluginInfo;
 use crate::plugins::{start_plugin_process, Plugin, PluginCatalog, PluginPid};
 use crate::recorder::Recorder;
 use crate::rpc::{
@@ -58,7 +59,7 @@ use crate::WeakXiCore;
 #[cfg(feature = "notify")]
 use crate::watcher::{FileWatcher, WatchToken};
 #[cfg(feature = "notify")]
-use notify::DebouncedEvent;
+use notify::Event;
 #[cfg(feature = "notify")]
 use std::ffi::OsStr;
 
@@ -79,6 +80,7 @@ pub type BufferIdentifier = BufferId;
 /// Totally arbitrary; we reserve this space for `ViewId`s
 pub(crate) const RENDER_VIEW_IDLE_MASK: usize = 1 << 25;
 pub(crate) const REWRAP_VIEW_IDLE_MASK: usize = 1 << 26;
+pub(crate) const FIND_VIEW_IDLE_MASK: usize = 1 << 27;
 
 const NEW_VIEW_IDLE_TOKEN: usize = 1001;
 
@@ -94,6 +96,9 @@ pub const OPEN_FILE_EVENT_TOKEN: WatchToken = WatchToken(2);
 
 #[cfg(feature = "notify")]
 const THEME_FILE_EVENT_TOKEN: WatchToken = WatchToken(3);
+
+#[cfg(feature = "notify")]
+const PLUGIN_EVENT_TOKEN: WatchToken = WatchToken(4);
 
 #[allow(dead_code)]
 pub struct CoreState {
@@ -153,6 +158,12 @@ impl CoreState {
             watcher.watch_filtered(p, true, THEME_FILE_EVENT_TOKEN, |p| {
                 p.extension().and_then(OsStr::to_str).unwrap_or("") == "tmTheme"
             });
+        }
+
+        let plugins_dir = config_manager.get_plugins_dir();
+        if let Some(p) = plugins_dir.as_ref() {
+            #[cfg(feature = "notify")]
+            watcher.watch_filtered(p, true, PLUGIN_EVENT_TOKEN, |p| p.is_dir() || !p.exists());
         }
 
         CoreState {
@@ -293,7 +304,7 @@ impl CoreState {
 
     /// Produces an iterator over all event contexts, with each view appearing
     /// exactly once.
-    fn iter_groups<'a>(&'a self) -> Iter<'a, Box<Iterator<Item = &ViewId> + 'a>> {
+    fn iter_groups<'a>(&'a self) -> Iter<'a, Box<dyn Iterator<Item = &ViewId> + 'a>> {
         Iter { views: Box::new(self.views.keys()), seen: HashSet::new(), inner: self }
     }
 
@@ -320,7 +331,6 @@ impl CoreState {
             // handled at the top level
             ClientStarted { .. } => (),
             SetLanguage { view_id, language_id } => self.do_set_language(view_id, language_id),
-            ToggleTail { view_id, enabled } => self.do_toggle_tail(view_id, enabled),
         }
     }
 
@@ -369,10 +379,15 @@ impl CoreState {
 
         let config = self.config_manager.add_buffer(buffer_id, path.as_ref().map(|p| p.as_path()));
 
-        //NOTE: because this is a synchronous call, we have to return the
-        //view_id before we can send any events to this view. We mark the
-        // view as pending and schedule the idle handler so that we can finish
-        // setting up this view on the next runloop pass, in finalize_new_views.
+        // NOTE: because this is a synchronous call, we have to initialize the
+        // view and return the view_id before we can send any events to this
+        // view. We call view_init(), mark the view as pending and schedule the
+        // idle handler so that we can finish setting up this view on the next
+        // runloop pass, in finalize_new_views.
+
+        let mut edit_ctx = self.make_context(view_id).unwrap();
+        edit_ctx.view_init();
+
         self.pending_views.push((view_id, config));
         self.peer.schedule_idle(NEW_VIEW_IDLE_TOKEN);
 
@@ -391,9 +406,10 @@ impl CoreState {
             None => return,
         };
 
-        let ed = &self.editors[&buffer_id];
+        let mut save_ctx = self.make_context(view_id).unwrap();
+        let fin_text = save_ctx.text_for_save();
 
-        if let Err(e) = self.file_manager.save(path, ed.borrow().get_buffer(), buffer_id) {
+        if let Err(e) = self.file_manager.save(path, &fin_text, buffer_id) {
             let error_message = e.to_string();
             error!("File error: {:?}", error_message);
             self.peer.alert(error_message);
@@ -497,23 +513,6 @@ impl CoreState {
         }
     }
 
-    #[cfg(feature = "notify")]
-    fn do_toggle_tail(&mut self, view_id: ViewId, enabled: bool) {
-        if let Some(view) = self.views.get_mut(&view_id) {
-            let buffer_id = view.borrow().get_buffer_id();
-            view.borrow_mut().toggle_tail(enabled);
-            match self.file_manager.toggle_tail(buffer_id, enabled) {
-                Ok(()) => return,
-                Err(err) => error!("Error reading file: {}", err),
-            }
-        }
-    }
-
-    #[cfg(not(feature = "notify"))]
-    fn do_toggle_tail(&mut self, _view_id: ViewId, _enabled: bool) {
-        warn!("do_toggle_tail called without notify feature enabled.");
-    }
-
     fn do_start_plugin(&mut self, _view_id: ViewId, plugin: &str) {
         if self.running_plugins.iter().any(|p| p.name == plugin) {
             info!("plugin {} already running", plugin);
@@ -570,12 +569,16 @@ impl CoreState {
             other if (other & REWRAP_VIEW_IDLE_MASK) != 0 => {
                 self.handle_rewrap_callback(other ^ REWRAP_VIEW_IDLE_MASK)
             }
+            other if (other & FIND_VIEW_IDLE_MASK) != 0 => {
+                self.handle_find_callback(other ^ FIND_VIEW_IDLE_MASK)
+            }
             other => panic!("unexpected idle token {}", other),
         };
     }
 
     fn finalize_new_views(&mut self) {
         let to_start = mem::replace(&mut self.pending_views, Vec::new());
+
         to_start.iter().for_each(|(id, config)| {
             let modified = self.detect_whitespace(*id, config);
             let config = modified.as_ref().unwrap_or(config);
@@ -592,7 +595,7 @@ impl CoreState {
             .get(&buffer_id)
             .expect("existing buffer_id must have corresponding editor");
 
-        if editor.borrow().get_buffer().len() == 0 {
+        if editor.borrow().get_buffer().is_empty() {
             return None;
         }
 
@@ -671,6 +674,14 @@ impl CoreState {
         }
     }
 
+    /// Callback for doing incremental find in a view
+    fn handle_find_callback(&mut self, token: usize) {
+        let id: ViewId = token.into();
+        if let Some(mut ctx) = self.make_context(id) {
+            ctx.do_incremental_find();
+        }
+    }
+
     #[cfg(feature = "notify")]
     fn handle_fs_events(&mut self) {
         let _t = trace_block("CoreState::handle_fs_events", &["core"]);
@@ -681,6 +692,7 @@ impl CoreState {
                 OPEN_FILE_EVENT_TOKEN => self.handle_open_file_fs_event(event),
                 CONFIG_EVENT_TOKEN => self.handle_config_fs_event(event),
                 THEME_FILE_EVENT_TOKEN => self.handle_themes_fs_event(event),
+                PLUGIN_EVENT_TOKEN => self.handle_plugin_fs_event(event),
                 _ => warn!("unexpected fs event token {:?}", token),
             }
         }
@@ -691,12 +703,14 @@ impl CoreState {
 
     /// Handles a file system event related to a currently open file
     #[cfg(feature = "notify")]
-    fn handle_open_file_fs_event(&mut self, event: DebouncedEvent) {
-        use notify::DebouncedEvent::*;
-        let path = match event {
-            NoticeWrite(ref path) | Create(ref path) | Write(ref path) | Chmod(ref path) => path,
+    fn handle_open_file_fs_event(&mut self, event: Event) {
+        use notify::event::*;
+        let path = match event.kind {
+            EventKind::Create(CreateKind::Any)
+            | EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any))
+            | EventKind::Modify(ModifyKind::Any) => &event.paths[0],
             other => {
-                debug!("Event in open file {:?}", other);
+                debug!("Ignoring event in open file {:?}", other);
                 return;
             }
         };
@@ -722,36 +736,27 @@ impl CoreState {
                     .find(|v| v.borrow().get_buffer_id() == buffer_id)
                     .map(|v| v.borrow().get_view_id())
                     .unwrap();
-
-                let file_info = self.file_manager.get_info(buffer_id);
-
-                match file_info {
-                    Some(v) => {
-                        let tail_mode_on = v.tail_details.is_tail_enabled;
-                        if tail_mode_on {
-                            self.make_context(view_id).unwrap().reload_tail(text);
-                        } else {
-                            self.make_context(view_id).unwrap().reload(text);
-                        }
-                    }
-                    None => error!("File info not found for buffer id {}", buffer_id),
-                };
+                self.make_context(view_id).unwrap().reload(text);
             }
         }
     }
 
     /// Handles a config related file system event.
     #[cfg(feature = "notify")]
-    fn handle_config_fs_event(&mut self, event: DebouncedEvent) {
-        use self::DebouncedEvent::*;
-        match event {
-            Create(ref path) | Write(ref path) | Chmod(ref path) => {
-                self.load_file_based_config(path)
+    fn handle_config_fs_event(&mut self, event: Event) {
+        use notify::event::*;
+        match event.kind {
+            EventKind::Create(CreateKind::Any)
+            | EventKind::Modify(ModifyKind::Any)
+            | EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)) => {
+                self.load_file_based_config(&event.paths[0])
             }
-            Remove(ref path) if !path.exists() => self.remove_config_at_path(path),
-            Rename(ref old, ref new) => {
-                self.remove_config_at_path(old);
-                self.load_file_based_config(new);
+            EventKind::Remove(RemoveKind::Any) if !event.paths[0].exists() => {
+                self.remove_config_at_path(&event.paths[0])
+            }
+            EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => {
+                self.remove_config_at_path(&event.paths[0]);
+                self.load_file_based_config(&event.paths[1]);
             }
             _ => (),
         }
@@ -763,21 +768,80 @@ impl CoreState {
         }
     }
 
-    /// Handles changes in theme files.
+    /// Handles changes in plugin files.
     #[cfg(feature = "notify")]
-    fn handle_themes_fs_event(&mut self, event: DebouncedEvent) {
-        use self::DebouncedEvent::*;
-        match event {
-            Create(ref path) | Write(ref path) => self.load_theme_file(path),
+    fn handle_plugin_fs_event(&mut self, event: Event) {
+        use notify::event::*;
+        match event.kind {
+            EventKind::Create(CreateKind::Any) | EventKind::Modify(ModifyKind::Any) => {
+                self.plugins.load_from_paths(&[event.paths[0].clone()]);
+                if let Some(plugin) = self.plugins.get_from_path(&event.paths[0]) {
+                    self.do_start_plugin(ViewId(0), &plugin.name);
+                }
+            }
             // the way FSEvents on macOS work, we want to verify that this path
             // has actually be removed before we do anything.
-            NoticeRemove(ref path) | Remove(ref path) if !path.exists() => self.remove_theme(path),
-            Rename(ref old, ref new) => {
+            EventKind::Remove(RemoveKind::Any) if !event.paths[0].exists() => {
+                if let Some(plugin) = self.plugins.get_from_path(&event.paths[0]) {
+                    self.do_stop_plugin(ViewId(0), &plugin.name);
+                    self.plugins.remove_named(&plugin.name);
+                }
+            }
+            EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => {
+                let old = &event.paths[0];
+                let new = &event.paths[1];
+                if let Some(old_plugin) = self.plugins.get_from_path(old) {
+                    self.do_stop_plugin(ViewId(0), &old_plugin.name);
+                    self.plugins.remove_named(&old_plugin.name);
+                }
+
+                self.plugins.load_from_paths(&[new.clone()]);
+                if let Some(new_plugin) = self.plugins.get_from_path(new) {
+                    self.do_start_plugin(ViewId(0), &new_plugin.name);
+                }
+            }
+            EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any))
+            | EventKind::Remove(RemoveKind::Any) => {
+                if let Some(plugin) = self.plugins.get_from_path(&event.paths[0]) {
+                    self.do_stop_plugin(ViewId(0), &plugin.name);
+                    self.do_start_plugin(ViewId(0), &plugin.name);
+                }
+            }
+            _ => (),
+        }
+
+        self.views.keys().for_each(|view_id| {
+            let available_plugins = self
+                .plugins
+                .iter()
+                .map(|plugin| ClientPluginInfo { name: plugin.name.clone(), running: true })
+                .collect::<Vec<_>>();
+            self.peer.available_plugins(view_id.clone(), &available_plugins);
+        });
+    }
+
+    /// Handles changes in theme files.
+    #[cfg(feature = "notify")]
+    fn handle_themes_fs_event(&mut self, event: Event) {
+        use notify::event::*;
+        match event.kind {
+            EventKind::Create(CreateKind::Any) | EventKind::Modify(ModifyKind::Any) => {
+                self.load_theme_file(&event.paths[0])
+            }
+            // the way FSEvents on macOS work, we want to verify that this path
+            // has actually be removed before we do anything.
+            EventKind::Remove(RemoveKind::Any) if !event.paths[0].exists() => {
+                self.remove_theme(&event.paths[0]);
+            }
+            EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => {
+                let old = &event.paths[0];
+                let new = &event.paths[1];
                 self.remove_theme(old);
                 self.load_theme_file(new);
             }
-            Chmod(ref path) | Remove(ref path) => {
-                self.style_map.borrow_mut().sync_dir(path.parent())
+            EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any))
+            | EventKind::Remove(RemoveKind::Any) => {
+                self.style_map.borrow_mut().sync_dir(event.paths[0].parent())
             }
             _ => (),
         }
@@ -822,16 +886,16 @@ impl CoreState {
     where
         P: AsRef<Path>,
     {
-        use xi_trace_dump::*;
+        use xi_trace::chrome_trace_dump;
         let mut all_traces = xi_trace::samples_cloned_unsorted();
-        if let Ok(mut traces) = chrome_trace::decode(frontend_samples) {
+        if let Ok(mut traces) = chrome_trace_dump::decode(frontend_samples) {
             all_traces.append(&mut traces);
         }
 
         for plugin in &self.running_plugins {
             match plugin.collect_trace() {
                 Ok(json) => {
-                    let mut trace = chrome_trace::decode(json).unwrap();
+                    let mut trace = chrome_trace_dump::decode(json).unwrap();
                     all_traces.append(&mut trace);
                 }
                 Err(e) => error!("trace error {:?}", e),
@@ -848,7 +912,7 @@ impl CoreState {
             }
         };
 
-        if let Err(e) = chrome_trace::serialize(&all_traces, &mut trace_file) {
+        if let Err(e) = chrome_trace_dump::serialize(&all_traces, &mut trace_file) {
             error!("error saving trace {:?}", e);
         }
     }
@@ -863,7 +927,6 @@ impl CoreState {
                 let init_info =
                     self.iter_groups().map(|mut ctx| ctx.plugin_info()).collect::<Vec<_>>();
                 plugin.initialize(init_info);
-                self.iter_groups().for_each(|mut cx| cx.plugin_started(&plugin));
                 self.running_plugins.push(plugin);
             }
             Err(e) => error!("failed to start plugin {:?}", e),

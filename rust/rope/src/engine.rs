@@ -39,13 +39,14 @@ use crate::multiset::{CountMatcher, Subset};
 use crate::rope::{Rope, RopeInfo};
 
 /// Represents the current state of a document and all of its history
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Engine {
     /// The session ID used to create new `RevId`s for edits made on this device
-    #[serde(default = "default_session", skip_serializing)]
+    #[cfg_attr(feature = "serde", serde(default = "default_session", skip_serializing))]
     session: SessionId,
     /// The incrementing revision number counter for this session used for `RevId`s
-    #[serde(default = "initial_revision_counter", skip_serializing)]
+    #[cfg_attr(feature = "serde", serde(default = "initial_revision_counter", skip_serializing))]
     rev_id_counter: u32,
     /// The current contents of the document as would be displayed on screen
     text: Rope,
@@ -75,7 +76,8 @@ pub struct Engine {
 
 // The advantage of using a session ID over random numbers is that it can be
 // easily delta-compressed later.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct RevId {
     // 96 bits has a 10^(-12) chance of collision with 400 million sessions and 10^(-6) with 100 billion.
     // `session1==session2==0` is reserved for initialization which is the same on all sessions.
@@ -88,7 +90,8 @@ pub struct RevId {
     num: u32,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 struct Revision {
     /// This uniquely represents the identity of this revision and it stays
     /// the same even if it is rebased or merged between devices.
@@ -126,7 +129,8 @@ struct FullPriority {
 
 use self::Contents::*;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 enum Contents {
     Edit {
         /// Used to order concurrent inserts, for example auto-indentation
@@ -159,6 +163,7 @@ fn default_session() -> (u64, u32) {
 }
 
 /// Revision 0 is always an Undo of the empty set of groups
+#[cfg(feature = "serde")]
 fn initial_revision_counter() -> u32 {
     1
 }
@@ -187,7 +192,7 @@ impl Engine {
     /// ancestor in order to be mergeable.
     pub fn new(initial_contents: Rope) -> Engine {
         let mut engine = Engine::empty();
-        if initial_contents.len() > 0 {
+        if !initial_contents.is_empty() {
             let first_rev = engine.get_head_rev_id().token();
             let delta = Delta::simple_edit(Interval::new(0, 0), initial_contents, 0);
             engine.edit_rev(0, 0, first_rev, delta);
@@ -483,10 +488,10 @@ impl Engine {
                     return i + 1; // +1 since we know the one we just found doesn't have it
                 }
             }
-            return 0;
+            0
         } else {
             // no toggled groups, return past end
-            return self.revs.len();
+            self.revs.len()
         }
     }
 
@@ -958,7 +963,7 @@ impl std::fmt::Debug for Error {
 impl std::error::Error for Error {}
 
 #[cfg(test)]
-#[cfg_attr(rustfmt, rustfmt_skip)]
+#[rustfmt::skip]
 mod tests {
     use crate::engine::*;
     use crate::rope::{Rope, RopeInfo};

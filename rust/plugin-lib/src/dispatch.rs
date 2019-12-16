@@ -142,8 +142,6 @@ impl<'a, P: 'a + Plugin> Dispatcher<'a, P> {
     }
 
     fn do_tracing_config(&mut self, enabled: bool) {
-        use xi_trace;
-
         if enabled {
             xi_trace::enable_tracing();
             info!("Enabling tracing in global plugin {:?}", self.pid);
@@ -175,10 +173,10 @@ impl<'a, P: 'a + Plugin> Dispatcher<'a, P> {
     }
 
     fn do_collect_trace(&self) -> Result<Value, RemoteError> {
-        use xi_trace_dump::*;
+        use xi_trace::chrome_trace_dump;
 
         let samples = xi_trace::samples_cloned_unsorted();
-        chrome_trace::to_value(&samples).map_err(|e| RemoteError::Custom {
+        chrome_trace_dump::to_value(&samples).map_err(|e| RemoteError::Custom {
             code: 0,
             message: format!("Could not serialize trace: {:?}", e),
             data: None,

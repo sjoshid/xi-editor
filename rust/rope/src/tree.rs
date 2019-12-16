@@ -60,6 +60,15 @@ pub trait NodeInfo: Clone {
     }
 }
 
+/// A trait indicating the default metric of a NodeInfo.
+///
+/// Adds quality of life functions to
+/// Node\<N\>, where N is a DefaultMetric.
+/// For example, [Node\<DefaultMetric\>.count](struct.Node.html#method.count).
+pub trait DefaultMetric: NodeInfo {
+    type DefaultMetric: Metric<Self>;
+}
+
 /// A trait for the leaves of trees of type [Node](struct.Node.html).
 ///
 /// Two leafs can be concatenated using `push_maybe_split`.
@@ -206,6 +215,10 @@ impl<N: NodeInfo> Node<N> {
 
     pub fn len(&self) -> usize {
         self.0.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     fn height(&self) -> usize {
@@ -355,7 +368,6 @@ impl<N: NodeInfo> Node<N> {
                     child.push_subseq(b, rec_iv);
                     offset += child.len();
                 }
-                return;
             }
         }
     }
@@ -407,6 +419,42 @@ impl<N: NodeInfo> Node<N> {
         let l = node.get_leaf();
         let base = M1::to_base_units(l, m1);
         m2 + M2::from_base_units(l, base)
+    }
+}
+
+impl<N: DefaultMetric> Node<N> {
+    /// Measures the length of the text bounded by ``DefaultMetric::measure(offset)`` with another metric.
+    ///
+    /// # Examples
+    /// ```
+    /// use crate::xi_rope::{Rope, LinesMetric};
+    ///
+    /// // the default metric of Rope is BaseMetric (aka number of bytes)
+    /// let my_rope = Rope::from("first line \n second line \n");
+    ///
+    /// // count the number of lines in my_rope
+    /// let num_lines = my_rope.count::<LinesMetric>(my_rope.len());
+    /// assert_eq!(2, num_lines);
+    /// ```
+    pub fn count<M: Metric<N>>(&self, offset: usize) -> usize {
+        self.convert_metrics::<N::DefaultMetric, M>(offset)
+    }
+
+    /// Measures the length of the text bounded by ``M::measure(offset)`` with the default metric.
+    ///
+    /// # Examples
+    /// ```
+    /// use crate::xi_rope::{Rope, LinesMetric};
+    ///
+    /// // the default metric of Rope is BaseMetric (aka number of bytes)
+    /// let my_rope = Rope::from("first line \n second line \n");
+    ///
+    /// // get the byte offset of the line at index 1
+    /// let byte_offset = my_rope.count_base_units::<LinesMetric>(1);
+    /// assert_eq!(12, byte_offset);
+    /// ```
+    pub fn count_base_units<M: Metric<N>>(&self, offset: usize) -> usize {
+        self.convert_metrics::<M, N::DefaultMetric>(offset)
     }
 }
 
@@ -975,6 +1023,12 @@ mod test {
     }
 
     #[test]
+    fn node_is_empty() {
+        let text = Rope::from(String::new());
+        assert_eq!(text.is_empty(), true);
+    }
+
+    #[test]
     fn cursor_next_empty() {
         let text = Rope::from(String::new());
         let mut cursor = Cursor::new(&text, 0);
@@ -1030,6 +1084,7 @@ mod test {
     #[test]
     fn cursor_prev_misc() {
         cursor_prev_for("toto");
+        cursor_prev_for("a\na\n");
         cursor_prev_for("toto\n");
         cursor_prev_for("toto\ntata");
         cursor_prev_for("歴史\n科学的");
@@ -1043,7 +1098,12 @@ mod test {
             let mut c = Cursor::new(&r, i);
             let it = c.prev::<LinesMetric>();
             let pos = c.pos();
-            assert!(s.as_bytes()[pos..i].iter().all(|c| *c != b'\n'), "missed linebreak");
+
+            //Should countain at most one linebreak
+            assert!(
+                s.as_bytes()[pos..i].iter().filter(|c| **c == b'\n').count() <= 1,
+                "missed linebreak"
+            );
 
             if i == 0 && s.as_bytes()[i] == b'\n' {
                 assert_eq!(pos, 0);
@@ -1089,5 +1149,37 @@ mod test {
             assert_eq!(cursor.get_leaf(), None);
             assert_eq!(cursor.pos(), 0);
         }
+    }
+
+    #[test]
+    fn prev_line_large() {
+        let s: String = format!("{}{}", "\n", build_triangle(1000));
+        let rope = Rope::from(s);
+        let mut expected_pos = rope.len();
+        let mut cursor = Cursor::new(&rope, rope.len());
+
+        for i in (1..1001).rev() {
+            expected_pos = expected_pos - i;
+            assert_eq!(expected_pos, cursor.prev::<LinesMetric>().unwrap());
+        }
+
+        assert_eq!(None, cursor.prev::<LinesMetric>());
+    }
+
+    #[test]
+    fn prev_line_small() {
+        let empty_rope = Rope::from("\n");
+        let mut cursor = Cursor::new(&empty_rope, empty_rope.len());
+        assert_eq!(None, cursor.prev::<LinesMetric>());
+
+        let rope = Rope::from("\n\n\n\n\n\n\n\n\n\n");
+        cursor = Cursor::new(&rope, rope.len());
+        let mut expected_pos = rope.len();
+        for _ in (1..10).rev() {
+            expected_pos -= 1;
+            assert_eq!(expected_pos, cursor.prev::<LinesMetric>().unwrap());
+        }
+
+        assert_eq!(None, cursor.prev::<LinesMetric>());
     }
 }

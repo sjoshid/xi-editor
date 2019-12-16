@@ -29,7 +29,7 @@ use xi_plugin_lib::CoreProxy;
 
 /// A type to abstract communication with the language server
 pub struct LanguageServerClient {
-    writer: Box<Write + Send>,
+    writer: Box<dyn Write + Send>,
     pending: HashMap<u64, Callback>,
     next_id: u64,
     language_id: String,
@@ -60,7 +60,7 @@ fn number_from_id(id: &Id) -> u64 {
 
 impl LanguageServerClient {
     pub fn new(
-        writer: Box<Write + Send>,
+        writer: Box<dyn Write + Send>,
         core: CoreProxy,
         result_queue: ResultQueue,
         language_id: String,
@@ -196,6 +196,7 @@ impl LanguageServerClient {
             initialization_options: None,
             capabilities: client_capabilities,
             trace: Some(TraceOption::Verbose),
+            workspace_folders: None,
         };
 
         let params = Params::from(serde_json::to_value(init_params).unwrap());

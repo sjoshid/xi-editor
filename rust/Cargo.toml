@@ -1,11 +1,11 @@
 [package]
 name = "xi-core"
-version = "0.2.0"
+version = "0.3.0"
 license = "Apache-2.0"
 authors = ["Raph Levien <raph@google.com>"]
 description = "Main process for xi-core, based on json-rpc"
 categories = ["text-editors"]
-repository = "https://github.com/google/xi-editor"
+repository = "https://github.com/xi-editor/xi-editor"
 edition = '2018'
 
 [dependencies]
@@ -14,7 +14,7 @@ serde_json = "1.0"
 chrono = "0.4.5"
 fern = "0.5.6"
 log = "0.4.3"
-dirs = "1.0.4"
+dirs = "2.0"
 
 [dependencies.xi-core-lib]
 path = "core-lib"
@@ -33,9 +33,13 @@ members = [
   "sample-plugin",
   "syntect-plugin",
   "trace",
-  "trace-dump",
   "unicode",
 ]
 
 [profile.bench]
 lto = true
+
+# Avoid libllvm/libclang dep. See https://github.com/rust-onig/rust-onig/pull/108
+[patch.crates-io]
+onig = { git="https://github.com/kornelski/rust-onig", branch="default-bindgen" }
+onig_sys = { git="https://github.com/kornelski/rust-onig", branch="default-bindgen" }

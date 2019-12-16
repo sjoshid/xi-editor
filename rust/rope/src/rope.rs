@@ -19,18 +19,15 @@ use std::borrow::Cow;
 use std::cmp::{max, min};
 use std::fmt;
 use std::ops::Add;
-use std::str;
-use std::str::FromStr;
+use std::str::{self, FromStr};
 use std::string::ParseError;
 
 use crate::delta::{Delta, DeltaElement};
 use crate::interval::{Interval, IntervalBounds};
-use crate::tree::{Cursor, Leaf, Metric, Node, NodeInfo, TreeBuilder};
+use crate::tree::{Cursor, DefaultMetric, Leaf, Metric, Node, NodeInfo, TreeBuilder};
 
 use bytecount;
 use memchr::{memchr, memrchr};
-use serde::de::{Deserialize, Deserializer};
-use serde::ser::{Serialize, SerializeStruct, SerializeTupleVariant, Serializer};
 
 use unicode_segmentation::GraphemeCursor;
 use unicode_segmentation::GraphemeIncomplete;
@@ -47,9 +44,8 @@ const MAX_LEAF: usize = 1024;
 /// version of Ropes, and if there are many copies of similar strings, the common parts
 /// are shared.
 ///
-/// Internally, the implementation uses reference counting (not thread safe, though
-/// it would be easy enough to modify to use `Arc` instead of `Rc` if that were
-/// required). Mutations are generally copy-on-write, though in-place edits are
+/// Internally, the implementation uses thread safe reference counting.
+/// Mutations are generally copy-on-write, though in-place edits are
 /// supported as an optimization when only one reference exists, making the
 /// implementation as efficient as a mutable version.
 ///
@@ -142,6 +138,10 @@ impl NodeInfo for RopeInfo {
     fn identity() -> Self {
         RopeInfo { lines: 0, utf16_size: 0 }
     }
+}
+
+impl DefaultMetric for RopeInfo {
+    type DefaultMetric = BaseMetric;
 }
 
 //TODO: document metrics, based on https://github.com/google/xi-editor/issues/456
@@ -259,7 +259,8 @@ impl Metric<RopeInfo> for LinesMetric {
     }
 
     fn prev(s: &String, offset: usize) -> Option<usize> {
-        memrchr(b'\n', &s.as_bytes()[..offset]).map(|pos| pos + 1)
+        debug_assert!(offset > 0, "caller is responsible for validating input");
+        memrchr(b'\n', &s.as_bytes()[..offset - 1]).map(|pos| pos + 1)
     }
 
     fn next(s: &String, offset: usize) -> Option<usize> {
@@ -382,98 +383,6 @@ impl FromStr for Rope {
     }
 }
 
-impl Serialize for Rope {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&String::from(self))
-    }
-}
-
-impl<'de> Deserialize<'de> for Rope {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        Ok(Rope::from(s))
-    }
-}
-
-impl Serialize for DeltaElement<RopeInfo> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match *self {
-            DeltaElement::Copy(ref start, ref end) => {
-                let mut el = serializer.serialize_tuple_variant("DeltaElement", 0, "copy", 2)?;
-                el.serialize_field(start)?;
-                el.serialize_field(end)?;
-                el.end()
-            }
-            DeltaElement::Insert(ref node) => {
-                serializer.serialize_newtype_variant("DeltaElement", 1, "insert", node)
-            }
-        }
-    }
-}
-
-impl Serialize for Delta<RopeInfo> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut delta = serializer.serialize_struct("Delta", 2)?;
-        delta.serialize_field("els", &self.els)?;
-        delta.serialize_field("base_len", &self.base_len)?;
-        delta.end()
-    }
-}
-
-impl<'de> Deserialize<'de> for Delta<RopeInfo> {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        // NOTE: we derive to an interim representation and then convert
-        // that into our actual target.
-        #[derive(Serialize, Deserialize)]
-        #[serde(rename_all = "snake_case")]
-        enum RopeDeltaElement_ {
-            Copy(usize, usize),
-            Insert(String),
-        }
-
-        #[derive(Serialize, Deserialize)]
-        struct RopeDelta_ {
-            els: Vec<RopeDeltaElement_>,
-            base_len: usize,
-        }
-
-        impl From<RopeDeltaElement_> for DeltaElement<RopeInfo> {
-            fn from(elem: RopeDeltaElement_) -> DeltaElement<RopeInfo> {
-                match elem {
-                    RopeDeltaElement_::Copy(start, end) => DeltaElement::Copy(start, end),
-                    RopeDeltaElement_::Insert(s) => DeltaElement::Insert(Rope::from(s)),
-                }
-            }
-        }
-
-        impl From<RopeDelta_> for Delta<RopeInfo> {
-            fn from(mut delta: RopeDelta_) -> Delta<RopeInfo> {
-                Delta {
-                    els: delta.els.drain(..).map(DeltaElement::from).collect(),
-                    base_len: delta.base_len,
-                }
-            }
-        }
-        let d = RopeDelta_::deserialize(deserializer)?;
-        Ok(Delta::from(d))
-    }
-}
-
 impl Rope {
     /// Edit the string, replacing the byte range [`start`..`end`] with `new`.
     ///
@@ -508,6 +417,26 @@ impl Rope {
         cursor.next::<BaseMetric>()
     }
 
+    /// Returns `offset` if it lies on a codepoint boundary. Otherwise returns
+    /// the codepoint after `offset`.
+    pub fn at_or_next_codepoint_boundary(&self, offset: usize) -> Option<usize> {
+        if self.is_codepoint_boundary(offset) {
+            Some(offset)
+        } else {
+            self.next_codepoint_offset(offset)
+        }
+    }
+
+    /// Returns `offset` if it lies on a codepoint boundary. Otherwise returns
+    /// the codepoint before `offset`.
+    pub fn at_or_prev_codepoint_boundary(&self, offset: usize) -> Option<usize> {
+        if self.is_codepoint_boundary(offset) {
+            Some(offset)
+        } else {
+            self.prev_codepoint_offset(offset)
+        }
+    }
+
     pub fn prev_grapheme_offset(&self, offset: usize) -> Option<usize> {
         let mut cursor = Cursor::new(self, offset);
         cursor.prev_grapheme()
@@ -530,7 +459,7 @@ impl Rope {
     /// This function will panic if `offset > self.len()`. Callers are expected to
     /// validate their input.
     pub fn line_of_offset(&self, offset: usize) -> usize {
-        self.convert_metrics::<BaseMetric, LinesMetric>(offset)
+        self.count::<LinesMetric>(offset)
     }
 
     /// Return the byte offset corresponding to the line number `line`.
@@ -553,7 +482,7 @@ impl Rope {
         } else if line == max_line {
             return self.len();
         }
-        self.convert_metrics::<LinesMetric, BaseMetric>(line)
+        self.count_base_units::<LinesMetric>(line)
     }
 
     /// Returns an iterator over chunks of the rope.
@@ -756,6 +685,12 @@ impl<'a> Cursor<'a, RopeInfo> {
         }
     }
 
+    /// Get the next codepoint after the cursor position, without advancing
+    /// the cursor.
+    pub fn peek_next_codepoint(&self) -> Option<char> {
+        self.get_leaf().and_then(|(l, off)| l[off..].chars().next())
+    }
+
     pub fn next_grapheme(&mut self) -> Option<usize> {
         let (mut l, mut offset) = self.get_leaf()?;
         let mut pos = self.pos();
@@ -894,7 +829,6 @@ impl<'a> Iterator for Lines<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_test::{assert_tokens, Token};
 
     #[test]
     fn replace_small() {
@@ -1018,6 +952,29 @@ mod tests {
     }
 
     #[test]
+    fn peek_next_codepoint() {
+        let inp = Rope::from("$¢€£💶");
+        let mut cursor = Cursor::new(&inp, 0);
+        assert_eq!(cursor.peek_next_codepoint(), Some('$'));
+        assert_eq!(cursor.peek_next_codepoint(), Some('$'));
+        assert_eq!(cursor.next_codepoint(), Some('$'));
+        assert_eq!(cursor.peek_next_codepoint(), Some('¢'));
+        assert_eq!(cursor.prev_codepoint(), Some('$'));
+        assert_eq!(cursor.peek_next_codepoint(), Some('$'));
+        assert_eq!(cursor.next_codepoint(), Some('$'));
+        assert_eq!(cursor.next_codepoint(), Some('¢'));
+        assert_eq!(cursor.peek_next_codepoint(), Some('€'));
+        assert_eq!(cursor.next_codepoint(), Some('€'));
+        assert_eq!(cursor.peek_next_codepoint(), Some('£'));
+        assert_eq!(cursor.next_codepoint(), Some('£'));
+        assert_eq!(cursor.peek_next_codepoint(), Some('💶'));
+        assert_eq!(cursor.next_codepoint(), Some('💶'));
+        assert_eq!(cursor.peek_next_codepoint(), None);
+        assert_eq!(cursor.next_codepoint(), None);
+        assert_eq!(cursor.peek_next_codepoint(), None);
+    }
+
+    #[test]
     fn prev_grapheme_offset() {
         // A with ring, hangul, regional indicator "US"
         let a = Rope::from("A\u{030a}\u{110b}\u{1161}\u{1f1fa}\u{1f1f8}");
@@ -1059,14 +1016,6 @@ mod tests {
         assert_eq!(Some(8), a.next_grapheme_offset(0));
         assert_eq!(Some(s1.len() * 3), a.prev_grapheme_offset(s1.len() * 3 + 4));
         assert_eq!(None, a.next_grapheme_offset(s1.len() * 3 + 4));
-    }
-
-    #[test]
-    fn test_ser_de() {
-        let rope = Rope::from("a\u{00A1}\u{4E00}\u{1F4A9}");
-        assert_tokens(&rope, &[Token::Str("a\u{00A1}\u{4E00}\u{1F4A9}")]);
-        assert_tokens(&rope, &[Token::String("a\u{00A1}\u{4E00}\u{1F4A9}")]);
-        assert_tokens(&rope, &[Token::BorrowedStr("a\u{00A1}\u{4E00}\u{1F4A9}")]);
     }
 
     #[test]
@@ -1148,6 +1097,19 @@ mod tests {
     }
 
     #[test]
+    fn default_metric_test() {
+        let rope = Rope::from("hi\ni'm\nfour\nlines\n");
+        assert_eq!(
+            rope.convert_metrics::<BaseMetric, LinesMetric>(rope.len()),
+            rope.count::<LinesMetric>(rope.len())
+        );
+        assert_eq!(
+            rope.convert_metrics::<LinesMetric, BaseMetric>(2),
+            rope.count_base_units::<LinesMetric>(2)
+        );
+    }
+
+    #[test]
     #[should_panic]
     fn line_of_offset_panic() {
         let rope = Rope::from("hi\ni'm\nfour\nlines");
@@ -1169,10 +1131,10 @@ mod tests {
 
         // position after 'f' in four
         let utf8_offset = 9;
-        let utf16_units = rope.convert_metrics::<BaseMetric, Utf16CodeUnitsMetric>(utf8_offset);
+        let utf16_units = rope.count::<Utf16CodeUnitsMetric>(utf8_offset);
         assert_eq!(utf16_units, 9);
 
-        let utf8_offset = rope.convert_metrics::<Utf16CodeUnitsMetric, BaseMetric>(utf16_units);
+        let utf8_offset = rope.count_base_units::<Utf16CodeUnitsMetric>(utf16_units);
         assert_eq!(utf8_offset, 9);
 
         let rope_with_emoji = Rope::from("hi\ni'm\n😀 four\nlines");
@@ -1182,22 +1144,18 @@ mod tests {
 
         // position after 'f' in four
         let utf8_offset = 13;
-        let utf16_units =
-            rope_with_emoji.convert_metrics::<BaseMetric, Utf16CodeUnitsMetric>(utf8_offset);
+        let utf16_units = rope_with_emoji.count::<Utf16CodeUnitsMetric>(utf8_offset);
         assert_eq!(utf16_units, 11);
 
-        let utf8_offset =
-            rope_with_emoji.convert_metrics::<Utf16CodeUnitsMetric, BaseMetric>(utf16_units);
+        let utf8_offset = rope_with_emoji.count_base_units::<Utf16CodeUnitsMetric>(utf16_units);
         assert_eq!(utf8_offset, 13);
 
         //for next line
         let utf8_offset = 19;
-        let utf16_units =
-            rope_with_emoji.convert_metrics::<BaseMetric, Utf16CodeUnitsMetric>(utf8_offset);
+        let utf16_units = rope_with_emoji.count::<Utf16CodeUnitsMetric>(utf8_offset);
         assert_eq!(utf16_units, 17);
 
-        let utf8_offset =
-            rope_with_emoji.convert_metrics::<Utf16CodeUnitsMetric, BaseMetric>(utf16_units);
+        let utf8_offset = rope_with_emoji.count_base_units::<Utf16CodeUnitsMetric>(utf16_units);
         assert_eq!(utf8_offset, 19);
     }
 
@@ -1239,5 +1197,35 @@ mod tests {
 
         assert!(long_text.len() > 1024);
         assert_eq!(cow, Cow::Borrowed(&long_text[..500]));
+    }
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod serde_tests {
+    use super::*;
+    use crate::Rope;
+    use serde_test::{assert_tokens, Token};
+
+    #[test]
+    fn serialize_and_deserialize() {
+        const TEST_LINE: &str = "test line\n";
+
+        // repeat test line enough times to exceed maximum leaf size
+        let n_seg = MAX_LEAF / TEST_LINE.len() + 1;
+        let test_str = TEST_LINE.repeat(n_seg);
+
+        let rope = Rope::from(test_str.as_str());
+        let json = serde_json::to_string(&rope).expect("error serializing");
+        let deserialized_rope =
+            serde_json::from_str::<Rope>(json.as_str()).expect("error deserializing");
+        assert_eq!(rope, deserialized_rope);
+    }
+
+    #[test]
+    fn test_ser_de() {
+        let rope = Rope::from("a\u{00A1}\u{4E00}\u{1F4A9}");
+        assert_tokens(&rope, &[Token::Str("a\u{00A1}\u{4E00}\u{1F4A9}")]);
+        assert_tokens(&rope, &[Token::String("a\u{00A1}\u{4E00}\u{1F4A9}")]);
+        assert_tokens(&rope, &[Token::BorrowedStr("a\u{00A1}\u{4E00}\u{1F4A9}")]);
     }
 }

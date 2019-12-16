@@ -35,10 +35,19 @@ pub struct Span<T: Clone> {
     data: T,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct SpansLeaf<T: Clone> {
     len: usize, // measured in base units
     spans: Vec<Span<T>>,
+}
+
+// It would be preferable to derive Default.
+// This would however require T to implement Default due to an issue in Rust.
+// See: https://github.com/rust-lang/rust/issues/26925
+impl<T: Clone> Default for SpansLeaf<T> {
+    fn default() -> Self {
+        SpansLeaf { len: 0, spans: vec![] }
+    }
 }
 
 #[derive(Clone)]
@@ -48,7 +57,7 @@ pub struct SpansInfo<T> {
     phantom: PhantomData<T>,
 }
 
-impl<T: Clone + Default> Leaf for SpansLeaf<T> {
+impl<T: Clone> Leaf for SpansLeaf<T> {
     fn len(&self) -> usize {
         self.len
     }
@@ -61,6 +70,7 @@ impl<T: Clone + Default> Leaf for SpansLeaf<T> {
         let iv_start = iv.start();
         for span in &other.spans {
             let span_iv = span.iv.intersect(iv).translate_neg(iv_start).translate(self.len);
+
             if !span_iv.is_empty() {
                 self.spans.push(Span { iv: span_iv, data: span.data.clone() });
             }
@@ -83,7 +93,7 @@ impl<T: Clone + Default> Leaf for SpansLeaf<T> {
     }
 }
 
-impl<T: Clone + Default> NodeInfo for SpansInfo<T> {
+impl<T: Clone> NodeInfo for SpansInfo<T> {
     type L = SpansLeaf<T>;
 
     fn accumulate(&mut self, other: &Self) {
@@ -100,14 +110,14 @@ impl<T: Clone + Default> NodeInfo for SpansInfo<T> {
     }
 }
 
-pub struct SpansBuilder<T: Clone + Default> {
+pub struct SpansBuilder<T: Clone> {
     b: TreeBuilder<SpansInfo<T>>,
     leaf: SpansLeaf<T>,
     len: usize,
     total_len: usize,
 }
 
-impl<T: Clone + Default> SpansBuilder<T> {
+impl<T: Clone> SpansBuilder<T> {
     pub fn new(total_len: usize) -> Self {
         SpansBuilder { b: TreeBuilder::new(), leaf: SpansLeaf::default(), len: 0, total_len }
     }
@@ -134,12 +144,12 @@ impl<T: Clone + Default> SpansBuilder<T> {
     }
 }
 
-pub struct SpanIter<'a, T: 'a + Clone + Default> {
+pub struct SpanIter<'a, T: 'a + Clone> {
     cursor: Cursor<'a, SpansInfo<T>>,
     ix: usize,
 }
 
-impl<T: Clone + Default> Spans<T> {
+impl<T: Clone> Spans<T> {
     /// Perform operational transformation on a spans object intended to be edited into
     /// a sequence at the given offset.
 
@@ -183,7 +193,7 @@ impl<T: Clone + Default> Spans<T> {
     pub fn merge<F, O>(&self, other: &Self, mut f: F) -> Spans<O>
     where
         F: FnMut(&T, Option<&T>) -> O,
-        O: Clone + Default,
+        O: Clone,
     {
         //TODO: confirm that this is sensible behaviour
         assert_eq!(self.len(), other.len());
@@ -291,9 +301,26 @@ impl<T: Clone + Default> Spans<T> {
         }
         *self = b.build();
     }
+
+    /// Deletes all spans that intersect with `interval` and that come after.
+    pub fn delete_after(&mut self, interval: Interval) {
+        let mut builder = SpansBuilder::new(self.len());
+
+        for (iv, data) in self.iter() {
+            // check if spans overlaps with interval
+            if iv.intersect(interval).is_empty() {
+                // keep the ones that are not overlapping
+                builder.add_span(iv, data.clone());
+            } else {
+                // all remaining spans are invalid
+                break;
+            }
+        }
+        *self = builder.build();
+    }
 }
 
-impl<T: Clone + Default + fmt::Debug> fmt::Debug for Spans<T> {
+impl<T: Clone + fmt::Debug> fmt::Debug for Spans<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let strs =
             self.iter().map(|(iv, val)| format!("{}: {:?}", iv, val)).collect::<Vec<String>>();
@@ -301,7 +328,7 @@ impl<T: Clone + Default + fmt::Debug> fmt::Debug for Spans<T> {
     }
 }
 
-impl<'a, T: Clone + Default> Iterator for SpanIter<'a, T> {
+impl<'a, T: Clone> Iterator for SpanIter<'a, T> {
     type Item = (Interval, &'a T);
 
     fn next(&mut self) -> Option<(Interval, &'a T)> {
@@ -418,5 +445,61 @@ mod tests {
         assert_eq!(*val, 9);
 
         assert!(merged_iter.next().is_none());
+    }
+
+    #[test]
+    fn test_delete_after() {
+        let mut sb = SpansBuilder::new(11);
+        sb.add_span(Interval::new(1, 2), 2);
+        sb.add_span(Interval::new(3, 5), 8);
+        sb.add_span(Interval::new(6, 8), 9);
+        sb.add_span(Interval::new(9, 10), 1);
+        sb.add_span(Interval::new(10, 11), 1);
+        let mut spans = sb.build();
+
+        spans.delete_after(Interval::new(4, 7));
+
+        assert_eq!(spans.iter().count(), 1);
+
+        let (iv, val) = spans.iter().next().unwrap();
+        assert_eq!(iv, Interval::new(1, 2));
+        assert_eq!(*val, 2);
+    }
+
+    #[test]
+    fn delete_after_big_at_start() {
+        let mut sb = SpansBuilder::new(10);
+        sb.add_span(0..10, 0);
+
+        let mut spans = sb.build();
+        assert_eq!(spans.iter().count(), 1);
+
+        spans.delete_after(Interval::new(1, 2));
+        assert_eq!(spans.iter().count(), 0);
+    }
+
+    #[test]
+    fn delete_after_big_and_small() {
+        let mut sb = SpansBuilder::new(10);
+        sb.add_span(0..10, 0);
+        sb.add_span(3..10, 1);
+
+        let mut spans = sb.build();
+        assert_eq!(spans.iter().count(), 2);
+
+        spans.delete_after(Interval::new(1, 2));
+        assert_eq!(spans.iter().count(), 0);
+    }
+
+    #[test]
+    fn delete_after_empty() {
+        let mut sb = SpansBuilder::new(10);
+        sb.add_span(0..3, 0);
+
+        let mut spans = sb.build();
+        assert_eq!(spans.iter().count(), 1);
+
+        spans.delete_after(Interval::new(5, 7));
+        assert_eq!(spans.iter().count(), 1);
     }
 }

@@ -186,6 +186,7 @@ pub struct BufferItems {
     pub word_wrap: bool,
     pub autodetect_whitespace: bool,
     pub surrounding_pairs: Vec<(String, String)>,
+    pub save_with_newline: bool,
 }
 
 pub type BufferConfig = Config<BufferItems>;
@@ -284,7 +285,8 @@ impl ConfigManager {
     ///
     /// Panics if `id` already exists.
     pub(crate) fn add_buffer(&mut self, id: BufferId, path: Option<&Path>) -> Table {
-        let lang = path.and_then(|p| self.language_for_path(p)).unwrap_or_default();
+        let lang =
+            path.and_then(|p| self.language_for_path(p)).unwrap_or(LanguageId::from("Plain Text"));
         let lang_tag = LanguageTag::new(lang);
         assert!(self.buffer_tags.insert(id, lang_tag).is_none());
         self.update_buffer_config(id).expect("new buffer must always have config")
@@ -537,6 +539,22 @@ impl ConfigManager {
         let themes_dir = self.config_dir.as_ref().map(|p| p.join("themes"));
 
         if let Some(p) = themes_dir {
+            if p.exists() {
+                return Some(p);
+            }
+            if fs::DirBuilder::new().create(&p).is_ok() {
+                return Some(p);
+            }
+        }
+        None
+    }
+
+    /// Path to plugins sub directory inside config directory.
+    /// Creates one if not present.
+    pub(crate) fn get_plugins_dir(&self) -> Option<PathBuf> {
+        let plugins_dir = self.config_dir.as_ref().map(|p| p.join("plugins"));
+
+        if let Some(p) = plugins_dir {
             if p.exists() {
                 return Some(p);
             }

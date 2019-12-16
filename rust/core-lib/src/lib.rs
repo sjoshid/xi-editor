@@ -24,7 +24,6 @@
     clippy::match_bool,
     clippy::needless_pass_by_value,
     clippy::new_without_default,
-    clippy::new_without_default_derive,
     clippy::or_fun_call,
     clippy::ptr_arg,
     clippy::too_many_arguments,
@@ -50,7 +49,6 @@ extern crate toml;
 extern crate xi_rope;
 extern crate xi_rpc;
 extern crate xi_trace;
-extern crate xi_trace_dump;
 extern crate xi_unicode;
 
 #[cfg(feature = "ledger")]

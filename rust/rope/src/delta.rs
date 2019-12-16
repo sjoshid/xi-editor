@@ -53,10 +53,10 @@ pub struct InsertDelta<N: NodeInfo>(Delta<N>);
 impl<N: NodeInfo> Delta<N> {
     pub fn simple_edit<T: IntervalBounds>(interval: T, rope: Node<N>, base_len: usize) -> Delta<N> {
         let mut builder = Builder::new(base_len);
-        if rope.len() > 0 {
-            builder.replace(interval, rope);
-        } else {
+        if rope.is_empty() {
             builder.delete(interval);
+        } else {
+            builder.replace(interval, rope);
         }
         builder.build()
     }
@@ -207,6 +207,9 @@ impl<N: NodeInfo> Delta<N> {
     ///     assert_eq!(String::from(d2.apply(r)), String::from(d.apply(r)));
     /// }
     /// ```
+    // For if last_old.is_some() && last_old.unwrap().0 <= beg {. Clippy complaints
+    // about not using if-let, but that'd change the meaning of the conditional.
+    #[allow(clippy::unnecessary_unwrap)]
     pub fn synthesize(tombstones: &Node<N>, from_dels: &Subset, to_dels: &Subset) -> Delta<N> {
         let base_len = from_dels.len_after_delete();
         let mut els = Vec::new();
@@ -592,7 +595,7 @@ impl<N: NodeInfo> Builder<N> {
     /// is not properly sorted.
     pub fn replace<T: IntervalBounds>(&mut self, interval: T, rope: Node<N>) {
         self.delete(interval);
-        if rope.len() > 0 {
+        if !rope.is_empty() {
             self.delta.els.push(DeltaElement::Insert(rope));
         }
     }
@@ -697,7 +700,6 @@ mod tests {
     use crate::interval::Interval;
     use crate::rope::{Rope, RopeInfo};
     use crate::test_helpers::find_deletions;
-    use serde_json;
 
     const TEST_STR: &'static str = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
@@ -822,15 +824,6 @@ mod tests {
     }
 
     #[test]
-    fn delta_serde() {
-        let d = Delta::simple_edit(Interval::new(10, 12), Rope::from("+"), TEST_STR.len());
-        let ser = serde_json::to_value(d.clone()).expect("serialize failed");
-        eprintln!("{:?}", &ser);
-        let de: Delta<RopeInfo> = serde_json::from_value(ser).expect("deserialize failed");
-        assert_eq!(d.apply_to_string(TEST_STR), de.apply_to_string(TEST_STR));
-    }
-
-    #[test]
     fn is_simple_delete() {
         let d = Delta::simple_edit(10..12, Rope::from("+"), TEST_STR.len());
         assert_eq!(false, d.is_simple_delete());
@@ -876,5 +869,23 @@ mod tests {
 
         let d = Delta::simple_edit(Interval::new(10, 10), Rope::from("+"), TEST_STR.len());
         assert_eq!(Some(Rope::from("+")).as_ref(), d.as_simple_insert());
+    }
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod serde_tests {
+    use crate::rope::{Rope, RopeInfo};
+    use crate::{Delta, Interval};
+    use serde_json;
+
+    const TEST_STR: &'static str = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+    #[test]
+    fn delta_serde() {
+        let d = Delta::simple_edit(Interval::new(10, 12), Rope::from("+"), TEST_STR.len());
+        let ser = serde_json::to_value(d.clone()).expect("serialize failed");
+        eprintln!("{:?}", &ser);
+        let de: Delta<RopeInfo> = serde_json::from_value(ser).expect("deserialize failed");
+        assert_eq!(d.apply_to_string(TEST_STR), de.apply_to_string(TEST_STR));
     }
 }
