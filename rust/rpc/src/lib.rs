@@ -27,7 +27,7 @@
 extern crate serde_json;
 #[macro_use]
 extern crate serde_derive;
-extern crate crossbeam;
+extern crate crossbeam_utils;
 extern crate serde;
 extern crate xi_trace;
 
@@ -75,7 +75,7 @@ pub trait Peer: Send + 'static {
     /// Used to implement `clone` in an object-safe way.
     /// For an explanation on this approach, see
     /// [this thread](https://users.rust-lang.org/t/solved-is-it-possible-to-clone-a-boxed-trait-object/1714/6).
-    fn box_clone(&self) -> Box<Peer>;
+    fn box_clone(&self) -> Box<dyn Peer>;
     /// Sends a notification (asynchronous RPC) to the peer.
     fn send_rpc_notification(&self, method: &str, params: &Value);
     /// Sends a request asynchronously, and the supplied callback will
@@ -83,7 +83,7 @@ pub trait Peer: Send + 'static {
     ///
     /// `Callback` is an alias for `FnOnce(Result<Value, Error>)`; it must
     /// be boxed because trait objects cannot use generic paramaters.
-    fn send_rpc_request_async(&self, method: &str, params: &Value, f: Box<Callback>);
+    fn send_rpc_request_async(&self, method: &str, params: &Value, f: Box<dyn Callback>);
     /// Sends a request (synchronous RPC) to the peer, and waits for the result.
     fn send_rpc_request(&self, method: &str, params: &Value) -> Result<Value, Error>;
     /// Determines whether an incoming request (or notification) is
@@ -105,7 +105,7 @@ pub trait Peer: Send + 'static {
 }
 
 /// The `Peer` trait object.
-pub type RpcPeer = Box<Peer>;
+pub type RpcPeer = Box<dyn Peer>;
 
 pub struct RpcCtx {
     peer: RpcPeer,
@@ -170,7 +170,7 @@ impl<F: Send + FnOnce(usize)> IdleProc for F {
 
 enum ResponseHandler {
     Chan(mpsc::Sender<Result<Value, Error>>),
-    Callback(Box<Callback>),
+    Callback(Box<dyn Callback>),
 }
 
 impl ResponseHandler {
@@ -254,7 +254,7 @@ impl<W: Write + Send> RpcLoop<W> {
         RF: Send + FnOnce() -> R,
         H: Handler,
     {
-        let exit = crossbeam::scope(|scope| {
+        let exit = crossbeam_utils::thread::scope(|scope| {
             let peer = self.get_raw_peer();
             peer.reset_needs_exit();
 
@@ -402,7 +402,7 @@ impl RpcCtx {
 }
 
 impl<W: Write + Send + 'static> Peer for RawPeer<W> {
-    fn box_clone(&self) -> Box<Peer> {
+    fn box_clone(&self) -> Box<dyn Peer> {
         Box::new((*self).clone())
     }
 
@@ -416,7 +416,7 @@ impl<W: Write + Send + 'static> Peer for RawPeer<W> {
         }
     }
 
-    fn send_rpc_request_async(&self, method: &str, params: &Value, f: Box<Callback>) {
+    fn send_rpc_request_async(&self, method: &str, params: &Value, f: Box<dyn Callback>) {
         let _trace = trace_block_payload("send req async", &["rpc"], method.to_owned());
         self.send_rpc_request_common(method, params, ResponseHandler::Callback(f));
     }
@@ -560,8 +560,8 @@ impl<W: Write> RawPeer<W> {
     }
 }
 
-impl Clone for Box<Peer> {
-    fn clone(&self) -> Box<Peer> {
+impl Clone for Box<dyn Peer> {
+    fn clone(&self) -> Box<dyn Peer> {
         self.box_clone()
     }
 }

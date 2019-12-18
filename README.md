@@ -7,7 +7,7 @@
 
 <h4 align="center">A modern editor with a backend written in Rust.</h4>
 
-***Note:*** *This is repo contains only the editor core, which is not usable on its own. For editors based on it, check out the list in [Frontends](#frontends).*
+***Note:*** *This repo contains only the editor core, which is not usable on its own. For editors based on it, check out the list in [Frontends](#frontends).*
 
 The xi-editor project is an attempt to build a high quality text editor,
 using modern software engineering techniques. It is initially built for
@@ -32,7 +32,7 @@ Goals include:
 **Learn more** with the creator of Xi, Raph Levien, in this [Recurse Center Localhost talk](https://www.recurse.com/events/localhost-raph-levien
 ).
 
-Screenshot (will need to be updated as syntax coloring and UI polish is added):
+Screenshot:
 
 ![xi-mac screenshot](/docs/docs/img/xi-mac-screenshot.png?raw=true)
 
@@ -77,6 +77,8 @@ Here are some front-ends in various stages of development:
 * [kod](https://github.com/linde12/kod), a terminal frontend written in Golang.
 
 * [xi-qt](https://github.com/sw5cc/xi-qt), a Qt front-end.
+
+* [vixi](https://github.com/Peltoche/vixi), a Vim like front-end in Rust.
 
 The following are currently inactive, based on earlier versions of the front-end
 protocol, but perhaps could be revitalized:

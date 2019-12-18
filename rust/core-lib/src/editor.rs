@@ -1066,5 +1066,4 @@ mod tests {
 
         assert_eq!(editor.get_buffer().to_string(), "sshello");
     }
-
 }
